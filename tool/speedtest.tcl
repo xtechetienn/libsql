@@ -37,9 +37,9 @@ proc runtest {title} {
   set t [expr {[lindex $t 0]/1000000.0}]
   puts [format $format PostgreSQL: $t]
   exec sync; after $delay;
-#  set t [time "exec mysql -f drh <$sqlfile" 1]
-#  set t [expr {[lindex $t 0]/1000000.0}]
-#  puts [format $format MySQL: $t]
+  set t [time "exec mysql -f drh <$sqlfile" 1]
+  set t [expr {[lindex $t 0]/1000000.0}]
+  puts [format $format MySQL: $t]
 #  set t [time "exec ./sqlite232 s232.db <$sqlfile" 1]
 #  set t [expr {[lindex $t 0]/1000000.0}]
 #  puts [format $format {SQLite 2.3.2:} $t]
@@ -73,12 +73,17 @@ close $fd
 catch {exec psql drh <clear.sql}
 catch {exec mysql drh <clear.sql}
 set fd [open 2kinit.sql w]
-puts $fd {PRAGMA cache_size=2000; PRAGMA synchronous=on;}
+puts $fd {
+  PRAGMA default_cache_size=2000;
+  PRAGMA default_synchronous=on;
+}
 close $fd
 exec ./sqlite240 s2k.db <2kinit.sql
-exec ./sqlite-t1 st1.db <2kinit.sql
 set fd [open nosync-init.sql w]
-puts $fd {PRAGMA cache_size=2000; PRAGMA synchronous=off;}
+puts $fd {
+  PRAGMA default_cache_size=2000;
+  PRAGMA default_synchronous=off;
+}
 close $fd
 exec ./sqlite240 sns.db <nosync-init.sql
 set ones {zero one two three four five six seven eight nine
@@ -157,7 +162,6 @@ runtest {100 SELECTs on a string comparison}
 set fd [open test$cnt.sql w]
 puts $fd {CREATE INDEX i2a ON t2(a);}
 puts $fd {CREATE INDEX i2b ON t2(b);}
-puts $fd {VACUUM;}
 close $fd
 runtest {Creating an index}
 
@@ -176,25 +180,37 @@ runtest {5000 SELECTs with an index}
 
 set fd [open test$cnt.sql w]
 puts $fd "BEGIN;"
-for {set i 0} {$i<100} {incr i} {
+for {set i 0} {$i<1000} {incr i} {
   set lwr [expr {$i*10}]
   set upr [expr {($i+1)*10}]
   puts $fd "UPDATE t1 SET b=b*2 WHERE a>=$lwr AND a<$upr;"
 }
 puts $fd "COMMIT;"
 close $fd
-runtest {100 UPDATEs without an index}
+runtest {1000 UPDATEs without an index}
 
 
 
 set fd [open test$cnt.sql w]
 puts $fd "BEGIN;"
 for {set i 1} {$i<=25000} {incr i} {
-  puts $fd "UPDATE t2 SET b=b+a WHERE a=$i;"
+  set r [expr {int(rand()*500000)}]
+  puts $fd "UPDATE t2 SET b=$r WHERE a=$i;"
 }
 puts $fd "COMMIT;"
 close $fd
 runtest {25000 UPDATEs with an index}
+
+
+set fd [open test$cnt.sql w]
+puts $fd "BEGIN;"
+for {set i 1} {$i<=25000} {incr i} {
+  set r [expr {int(rand()*500000)}]
+  puts $fd "UPDATE t2 SET c='[number_name $r]' WHERE a=$i;"
+}
+puts $fd "COMMIT;"
+close $fd
+runtest {25000 text UPDATEs with an index}
 
 
 
@@ -232,7 +248,7 @@ runtest {A big INSERT after a big DELETE}
 set fd [open test$cnt.sql w]
 puts $fd {BEGIN;}
 puts $fd {DELETE FROM t1;}
-for {set i 1} {$i<=1000} {incr i} {
+for {set i 1} {$i<=3000} {incr i} {
   set r [expr {int(rand()*100000)}]
   puts $fd "INSERT INTO t1 VALUES($i,$r,'[number_name $r]');"
 }
