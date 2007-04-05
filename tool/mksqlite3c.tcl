@@ -63,7 +63,8 @@ puts $out [subst \
 ** SQLite library.
 **
 ** This amalgamation was generated on $today.
-*/}]
+*/
+#define SQLITE_AMALGAMATION 1}]
 
 # These are the header files used by SQLite.  The first time any of these 
 # files are seen in a #include statement in the C code, include the complete
