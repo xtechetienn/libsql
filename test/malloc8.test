@@ -1,4 +1,4 @@
-# 2006 July 26
+# 2007 April 25
 #
 # The author disclaims copyright to this source code.  In place of
 # a legal notice, here is a blessing:
@@ -11,7 +11,7 @@
 # This file contains additional out-of-memory checks (see malloc.tcl)
 # added to expose a bug in out-of-memory handling for sqlite3_value_text()
 #
-# $Id: malloc8.test,v 1.1 2007/04/25 18:23:53 drh Exp $
+# $Id: malloc8.test,v 1.2 2007/04/30 21:39:16 drh Exp $
 
 set testdir [file dirname $argv0]
 source $testdir/tester.tcl
