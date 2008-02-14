@@ -20,19 +20,15 @@
 ** This version of the memory allocation subsystem is used if
 ** and only if SQLITE_MEMORY_SIZE is defined.
 **
-** $Id: mem3.c,v 1.10 2008/02/14 15:31:52 danielk1977 Exp $
+** $Id: mem3.c,v 1.11 2008/02/14 23:26:56 drh Exp $
 */
+#include "sqliteInt.h"
 
 /*
 ** This version of the memory allocator is used only when 
 ** SQLITE_MEMORY_SIZE is defined.
 */
-#if defined(SQLITE_MEMORY_SIZE)
-#include "sqliteInt.h"
-
-#ifdef SQLITE_MEMDEBUG
-# error  cannot define both SQLITE_MEMDEBUG and SQLITE_MEMORY_SIZE
-#endif
+#ifdef SQLITE_MEMORY_SIZE
 
 /*
 ** Maximum size (in Mem3Blocks) of a "small" chunk.
