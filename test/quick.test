@@ -6,7 +6,7 @@
 #***********************************************************************
 # This file runs all tests.
 #
-# $Id: quick.test,v 1.75 2008/03/28 15:44:10 danielk1977 Exp $
+# $Id: quick.test,v 1.76 2008/03/31 23:51:35 drh Exp $
 
 proc lshift {lvar} {
   upvar $lvar l
@@ -82,6 +82,7 @@ set EXCLUDE {
   utf16.test
   shared_err.test
   vtab_err.test
+  veryquick.test
 }
 
 if {[sqlite3 -has-codec]} {
