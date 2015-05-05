@@ -18,11 +18,9 @@
 ** for an example implementation.
 */
 
-#ifndef SQLITE_AMALGAMATION
-# include "sqliteInt.h"
-#endif
-
-#ifndef SQLITE_OMIT_VIRTUALTABLE
+#if (defined(SQLITE_ENABLE_DBSTAT_VTAB) || defined(SQLITE_TEST)) \
+    && !defined(SQLITE_OMIT_VIRTUALTABLE)
+#include "sqliteInt.h"   /* Requires access to internal data structures */
 
 /*
 ** Page paths:
@@ -140,15 +138,23 @@ static int statConnect(
   sqlite3_vtab **ppVtab,
   char **pzErr
 ){
-  StatTable *pTab;
+  StatTable *pTab = 0;
+  int rc = SQLITE_OK;
 
-  pTab = (StatTable *)sqlite3_malloc(sizeof(StatTable));
-  memset(pTab, 0, sizeof(StatTable));
-  pTab->db = db;
+  rc = sqlite3_declare_vtab(db, VTAB_SCHEMA);
+  if( rc==SQLITE_OK ){
+    pTab = (StatTable *)sqlite3_malloc64(sizeof(StatTable));
+    if( pTab==0 ) rc = SQLITE_NOMEM;
+  }
 
-  sqlite3_declare_vtab(db, VTAB_SCHEMA);
-  *ppVtab = &pTab->base;
-  return SQLITE_OK;
+  assert( rc==SQLITE_OK || pTab==0 );
+  if( rc==SQLITE_OK ){
+    memset(pTab, 0, sizeof(StatTable));
+    pTab->db = db;
+  }
+
+  *ppVtab = (sqlite3_vtab*)pTab;
+  return rc;
 }
 
 /*
@@ -195,33 +201,39 @@ static int statOpen(sqlite3_vtab *pVTab, sqlite3_vtab_cursor **ppCursor){
   StatCursor *pCsr;
   int rc;
 
-  pCsr = (StatCursor *)sqlite3_malloc(sizeof(StatCursor));
-  memset(pCsr, 0, sizeof(StatCursor));
-  pCsr->base.pVtab = pVTab;
+  pCsr = (StatCursor *)sqlite3_malloc64(sizeof(StatCursor));
+  if( pCsr==0 ){
+    rc = SQLITE_NOMEM;
+  }else{
+    memset(pCsr, 0, sizeof(StatCursor));
+    pCsr->base.pVtab = pVTab;
 
-  rc = sqlite3_prepare_v2(pTab->db, 
-      "SELECT 'sqlite_master' AS name, 1 AS rootpage, 'table' AS type"
-      "  UNION ALL  "
-      "SELECT name, rootpage, type FROM sqlite_master WHERE rootpage!=0"
-      "  ORDER BY name", -1,
-      &pCsr->pStmt, 0
-  );
-  if( rc!=SQLITE_OK ){
-    sqlite3_free(pCsr);
-    return rc;
+    rc = sqlite3_prepare_v2(pTab->db, 
+        "SELECT 'sqlite_master' AS name, 1 AS rootpage, 'table' AS type"
+        "  UNION ALL  "
+        "SELECT name, rootpage, type FROM sqlite_master WHERE rootpage!=0"
+        "  ORDER BY name", -1,
+        &pCsr->pStmt, 0
+        );
+    if( rc!=SQLITE_OK ){
+      sqlite3_free(pCsr);
+      pCsr = 0;
+    }
   }
 
   *ppCursor = (sqlite3_vtab_cursor *)pCsr;
-  return SQLITE_OK;
+  return rc;
 }
 
 static void statClearPage(StatPage *p){
   int i;
-  for(i=0; i<p->nCell; i++){
-    sqlite3_free(p->aCell[i].aOvfl);
+  if( p->aCell ){
+    for(i=0; i<p->nCell; i++){
+      sqlite3_free(p->aCell[i].aOvfl);
+    }
+    sqlite3_free(p->aCell);
   }
   sqlite3PagerUnref(p->pPg);
-  sqlite3_free(p->aCell);
   sqlite3_free(p->zPath);
   memset(p, 0, sizeof(StatPage));
 }
@@ -306,7 +318,8 @@ static int statDecodePage(Btree *pBt, StatPage *p){
     sqlite3BtreeEnter(pBt);
     nUsable = szPage - sqlite3BtreeGetReserveNoMutex(pBt);
     sqlite3BtreeLeave(pBt);
-    p->aCell = sqlite3_malloc((p->nCell+1) * sizeof(StatCell));
+    p->aCell = sqlite3_malloc64((p->nCell+1) * sizeof(StatCell));
+    if( p->aCell==0 ) return SQLITE_NOMEM;
     memset(p->aCell, 0, (p->nCell+1) * sizeof(StatCell));
 
     for(i=0; i<p->nCell; i++){
@@ -338,7 +351,8 @@ static int statDecodePage(Btree *pBt, StatPage *p){
           int nOvfl = ((nPayload - nLocal) + nUsable-4 - 1) / (nUsable - 4);
           pCell->nLastOvfl = (nPayload-nLocal) - (nOvfl-1) * (nUsable-4);
           pCell->nOvfl = nOvfl;
-          pCell->aOvfl = sqlite3_malloc(sizeof(u32)*nOvfl);
+          pCell->aOvfl = sqlite3_malloc64(sizeof(u32)*nOvfl);
+          if( pCell->aOvfl==0 ) return SQLITE_NOMEM;
           pCell->aOvfl[0] = sqlite3Get4byte(&aData[iOff+nLocal]);
           for(j=1; j<nOvfl; j++){
             int rc;
@@ -486,31 +500,33 @@ statNextRestart:
     pCsr->zName = (char *)sqlite3_column_text(pCsr->pStmt, 0);
     pCsr->iPageno = p->iPgno;
 
-    statDecodePage(pBt, p);
-    statSizeAndOffset(pCsr);
+    rc = statDecodePage(pBt, p);
+    if( rc==SQLITE_OK ){
+      statSizeAndOffset(pCsr);
 
-    switch( p->flags ){
-      case 0x05:             /* table internal */
-      case 0x02:             /* index internal */
-        pCsr->zPagetype = "internal";
-        break;
-      case 0x0D:             /* table leaf */
-      case 0x0A:             /* index leaf */
-        pCsr->zPagetype = "leaf";
-        break;
-      default:
-        pCsr->zPagetype = "corrupted";
-        break;
+      switch( p->flags ){
+        case 0x05:             /* table internal */
+        case 0x02:             /* index internal */
+          pCsr->zPagetype = "internal";
+          break;
+        case 0x0D:             /* table leaf */
+        case 0x0A:             /* index leaf */
+          pCsr->zPagetype = "leaf";
+          break;
+        default:
+          pCsr->zPagetype = "corrupted";
+          break;
+      }
+      pCsr->nCell = p->nCell;
+      pCsr->nUnused = p->nUnused;
+      pCsr->nMxPayload = p->nMxPayload;
+      pCsr->zPath = sqlite3_mprintf("%s", p->zPath);
+      nPayload = 0;
+      for(i=0; i<p->nCell; i++){
+        nPayload += p->aCell[i].nLocal;
+      }
+      pCsr->nPayload = nPayload;
     }
-    pCsr->nCell = p->nCell;
-    pCsr->nUnused = p->nUnused;
-    pCsr->nMxPayload = p->nMxPayload;
-    pCsr->zPath = sqlite3_mprintf("%s", p->zPath);
-    nPayload = 0;
-    for(i=0; i<p->nCell; i++){
-      nPayload += p->aCell[i].nLocal;
-    }
-    pCsr->nPayload = nPayload;
   }
 
   return rc;
@@ -579,6 +595,9 @@ static int statRowid(sqlite3_vtab_cursor *pCursor, sqlite_int64 *pRowid){
   return SQLITE_OK;
 }
 
+/*
+** Invoke this routine to register the "dbstat" virtual table module
+*/
 int sqlite3_dbstat_register(sqlite3 *db){
   static sqlite3_module dbstat_module = {
     0,                            /* iVersion */
@@ -602,46 +621,6 @@ int sqlite3_dbstat_register(sqlite3 *db){
     0,                            /* xFindMethod */
     0,                            /* xRename */
   };
-  sqlite3_create_module(db, "dbstat", &dbstat_module, 0);
-  return SQLITE_OK;
+  return sqlite3_create_module(db, "dbstat", &dbstat_module, 0);
 }
-
-#endif
-
-#if defined(SQLITE_TEST) || TCLSH==2
-#include <tcl.h>
-
-static int test_dbstat(
-  void *clientData,
-  Tcl_Interp *interp,
-  int objc,
-  Tcl_Obj *CONST objv[]
-){
-#ifdef SQLITE_OMIT_VIRTUALTABLE
-  Tcl_AppendResult(interp, "dbstat not available because of "
-                           "SQLITE_OMIT_VIRTUALTABLE", (void*)0);
-  return TCL_ERROR;
-#else
-  struct SqliteDb { sqlite3 *db; };
-  char *zDb;
-  Tcl_CmdInfo cmdInfo;
-
-  if( objc!=2 ){
-    Tcl_WrongNumArgs(interp, 1, objv, "DB");
-    return TCL_ERROR;
-  }
-
-  zDb = Tcl_GetString(objv[1]);
-  if( Tcl_GetCommandInfo(interp, zDb, &cmdInfo) ){
-    sqlite3* db = ((struct SqliteDb*)cmdInfo.objClientData)->db;
-    sqlite3_dbstat_register(db);
-  }
-  return TCL_OK;
-#endif
-}
-
-int SqlitetestStat_Init(Tcl_Interp *interp){
-  Tcl_CreateObjCommand(interp, "register_dbstat_vtab", test_dbstat, 0, 0);
-  return TCL_OK;
-}
-#endif /* if defined(SQLITE_TEST) || TCLSH==2 */
+#endif /* SQLITE_ENABLE_DBSTAT_VTAB */
