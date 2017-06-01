@@ -12,6 +12,9 @@
 **
 ** Unix-specific run-time environment implementation for LSM.
 */
+
+#ifndef WIN32
+
 #if defined(__GNUC__) || defined(__TINYC__)
 /* workaround for ftruncate() visibility on gcc. */
 # ifndef _XOPEN_SOURCE
@@ -739,3 +742,5 @@ lsm_env *lsm_default_env(void){
   };
   return &posix_env;
 }
+
+#endif
