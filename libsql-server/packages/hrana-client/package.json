@@ -7,8 +7,8 @@
   "exports": {
     ".": {
       "types": "./lib-esm/index.d.ts",
-      "require": "./lib-cjs/index.js",
-      "default": "./lib-esm/index.js"
+      "import": "./lib-esm/index.js",
+      "require": "./lib-cjs/index.js"
     }
   },
 
@@ -18,6 +18,7 @@
     "build:cjs": "tsc -p tsconfig.build-cjs.json",
     "build:esm": "tsc -p tsconfig.build-esm.json",
     "postbuild": "cp package-cjs.json ./lib-cjs/package.json",
+
     "test": "jest"
   },
 
