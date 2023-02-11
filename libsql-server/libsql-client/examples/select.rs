@@ -1,4 +1,4 @@
-use libsql_client::{Connection, QueryResult, Statement, Value};
+use libsql_client::{params, Connection, QueryResult, Statement};
 use rand::prelude::SliceRandom;
 
 fn result_to_string(result: QueryResult) -> String {
@@ -42,18 +42,19 @@ async fn bump_counter(db: impl Connection) -> String {
         *FAKE_LOCATIONS.choose(&mut rand::thread_rng()).unwrap();
 
     db.transaction([
-        Statement::with_params("INSERT INTO counter VALUES (?, ?, 0)", &[country, city]),
+        Statement::with_params(
+            "INSERT OR IGNORE INTO counter VALUES (?, ?, 0)",
+            // Parameters that have a single type can be passed as a regular slice
+            &[country, city],
+        ),
         Statement::with_params(
             "UPDATE counter SET value = value + 1 WHERE country = ? AND city = ?",
             &[country, city],
         ),
         Statement::with_params(
-            "INSERT INTO coordinates VALUES (?, ?, ?)",
-            &[
-                Value::Float(latitude),
-                Value::Float(longitude),
-                airport.into(),
-            ],
+            "INSERT OR IGNORE INTO coordinates VALUES (?, ?, ?)",
+            // Parameters with different types can be passed to a convenience macro - params!()
+            params!(latitude, longitude, airport),
         ),
     ])
     .await
@@ -70,7 +71,17 @@ async fn bump_counter(db: impl Connection) -> String {
 
 #[tokio::main]
 async fn main() {
-    let db = libsql_client::reqwest::Connection::connect_from_env().unwrap();
-    let response = bump_counter(db).await;
-    println!("{response}")
+    match libsql_client::reqwest::Connection::connect_from_env() {
+        Ok(remote_db) => {
+            let response = bump_counter(remote_db).await;
+            println!("Remote:\n{response}");
+        }
+        Err(e) => println!("Failed to fetch from a remote database: {e}"),
+    }
+
+    let mut path_buf = std::env::temp_dir();
+    path_buf.push("libsql_client_test_db.db");
+    let local_db = libsql_client::local::Connection::connect(path_buf.as_path()).unwrap();
+    let response = bump_counter(local_db).await;
+    println!("Local:\n{response}");
 }
