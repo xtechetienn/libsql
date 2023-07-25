@@ -10676,6 +10676,22 @@ SQLITE_API int sqlite3_preupdate_blobwrite(sqlite3 *);
 #endif
 
 /*
+** CAPI3REF: The close hook.
+** METHOD: sqlite3
+**
+** ^The [libsql_close_hook()] interface registers a callback function
+** that is invoked prior to closing the database connection.
+** ^At most one close hook may be registered at a time on a single
+** [database connection]; each call to [libsql_close_hook()] overrides
+** the previous setting.
+** ^The close hook is disabled by invoking [libsql_close_hook()]
+** with a NULL pointer as the second parameter.
+** ^The third parameter to [libsql_close_hook()] is passed through as
+** the first parameter to callbacks.
+*/
+SQLITE_API void *libsql_close_hook(sqlite3 *db, void (*xClose)(void *pCtx, sqlite3 *db), void *arg);
+
+/*
 ** CAPI3REF: Low-level system error code
 ** METHOD: sqlite3
 **
@@ -17808,6 +17824,10 @@ struct sqlite3 {
 #endif
   libsql_wal_methods* pWalMethods; /* Custom WAL methods */
   void* pWalMethodsData;           /* optional data for WAL methods */
+  void *pCloseArg;                 /* First argument to xCloseCallback */
+  void (*xCloseCallback)(          /* Registered using sqlite3_close_hook() */
+    void*, sqlite3*
+  );
 };
 
 /*
@@ -97617,6 +97637,7 @@ case OP_Last: {              /* jump, ncycle */
   pC->deferredMoveto = 0;
   pC->cacheStatus = CACHE_STALE;
   if( rc ) goto abort_due_to_error;
+  p->aLibsqlCounter[LIBSQL_STMTSTATUS_ROWS_READ - LIBSQL_STMTSTATUS_BASE]++;
   if( pOp->p2>0 ){
     VdbeBranchTaken(res!=0,2);
     if( res ) goto jump_to_p2;
@@ -177351,6 +177372,10 @@ static int sqlite3Close(sqlite3 *db, int forceZombie){
     db->trace.xV2(SQLITE_TRACE_CLOSE, db->pTraceArg, db, 0);
   }
 
+  if (db->xCloseCallback) {
+    db->xCloseCallback(db->pCloseArg, db);
+  }
+
   /* Force xDisconnect calls on all virtual tables */
   disconnectAllVtab(db);
 
@@ -178467,6 +178492,24 @@ SQLITE_API void *sqlite3_preupdate_hook(
   return pRet;
 }
 #endif /* SQLITE_ENABLE_PREUPDATE_HOOK */
+
+/*
+** Register a callback to be invoked when the connection is closed.
+*/
+void *libsql_close_hook(
+  sqlite3 *db,              /* Attach the hook to this connection */
+  void(*xCallback)(         /* Callback function */
+    void*,sqlite3*),
+  void *pArg                /* First callback argument */
+){
+  void *pRet;
+  sqlite3_mutex_enter(db->mutex);
+  pRet = db->pCloseArg;
+  db->xCloseCallback = xCallback;
+  db->pCloseArg = pArg;
+  sqlite3_mutex_leave(db->mutex);
+  return pRet;
+}
 
 /*
 ** Register a function to be invoked prior to each autovacuum that
