@@ -21,5 +21,5 @@ public interface CommitHook {
      Works as documented for the sqlite3_commit_hook() callback.
      Must not throw.
   */
-  int xCallback();
+  int xCommitHook();
 }
