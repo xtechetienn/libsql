@@ -12,20 +12,24 @@
 ** This file is part of the JNI bindings for the sqlite3 C API.
 */
 package org.sqlite.jni;
+import org.sqlite.jni.annotation.NotNull;
 
 /**
-   Callback for use with sqlite3_create_collation()
+   Callback for use with {@link SQLite3Jni#sqlite3_create_collation}.
+
+   @see AbstractCollationCallback
 */
-public abstract class CollationCallback
-  implements SQLite3CallbackProxy, XDestroyCallback {
+public interface CollationCallback
+  extends SQLite3CallbackProxy, XDestroyCallback {
   /**
-     Must compare the given byte arrays using memcmp() semantics.
+     Must compare the given byte arrays and return the result using
+     {@code memcmp()} semantics.
   */
-  public abstract int call(byte[] lhs, byte[] rhs);
+  int call(@NotNull byte[] lhs, @NotNull byte[] rhs);
 
   /**
      Called by SQLite when the collation is destroyed. If a collation
      requires custom cleanup, override this method.
   */
-  public void xDestroy(){}
+  void xDestroy();
 }
