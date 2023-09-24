@@ -33,5 +33,6 @@ expression: found
         }
       }
     }
-  ]
+  ],
+  "replication_index": null
 }
