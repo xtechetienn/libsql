@@ -37,11 +37,6 @@ public final class sqlite3 extends NativePointerHolder<sqlite3>
       ;
   }
 
-  @Override protected void finalize(){
-    //System.out.println(this+".finalize()");
-    CApi.sqlite3_close_v2(this.clearNativePointer());
-  }
-
   @Override public void close(){
     CApi.sqlite3_close_v2(this.clearNativePointer());
   }
