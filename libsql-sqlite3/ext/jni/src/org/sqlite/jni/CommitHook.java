@@ -1,5 +1,5 @@
 /*
-** 2023-07-22
+** 2023-08-04
 **
 ** The author disclaims copyright to this source code.  In place of
 ** a legal notice, here is a blessing:
@@ -11,15 +11,12 @@
 *************************************************************************
 ** This file is part of the JNI bindings for the sqlite3 C API.
 */
-package org.sqlite.jni;
+package org.sqlite.jni.fts5;
+
 
 /**
-   Callback proxy for use with sqlite3_commit_hook().
+   Callback type for use with xTokenize() variants.
 */
-public interface CommitHook {
-  /**
-     Works as documented for the sqlite3_commit_hook() callback.
-     Must not throw.
-  */
-  int xCommitHook();
+public interface XTokenizeCallback {
+  int call(int tFlags, byte[] txt, int iStart, int iEnd);
 }

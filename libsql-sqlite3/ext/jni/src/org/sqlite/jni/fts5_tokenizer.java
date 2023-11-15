@@ -11,11 +11,11 @@
 *************************************************************************
 ** This file is part of the JNI bindings for the sqlite3 C API.
 */
-package org.sqlite.jni;
+package org.sqlite.jni.fts5;
+import org.sqlite.jni.capi.NativePointerHolder;
+import org.sqlite.jni.annotation.NotNull;
 
 /**
-   INCOMPLETE AND COMPLETELY UNTESTED.
-
    A wrapper for communicating C-level (fts5_tokenizer*) instances with
    Java. These wrappers do not own their associated pointer, they
    simply provide a type-safe way to communicate it between Java and C
@@ -30,7 +30,7 @@ public final class fts5_tokenizer extends NativePointerHolder<fts5_tokenizer> {
 
   public native int xTokenize(@NotNull Fts5Tokenizer t, int tokFlags,
                               @NotNull byte pText[],
-                              @NotNull Fts5.xTokenizeCallback callback);
+                              @NotNull XTokenizeCallback callback);
 
 
   // int (*xTokenize)(Fts5Tokenizer*,
