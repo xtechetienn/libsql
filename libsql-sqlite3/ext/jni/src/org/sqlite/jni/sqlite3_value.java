@@ -11,7 +11,7 @@
 *************************************************************************
 ** This file is part of the JNI bindings for the sqlite3 C API.
 */
-package org.sqlite.jni;
+package org.sqlite.jni.capi;
 
 public final class sqlite3_value extends NativePointerHolder<sqlite3_value> {
   //! Invoked only from JNI.

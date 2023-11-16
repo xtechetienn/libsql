@@ -1,5 +1,5 @@
 /*
-** 2023-07-22
+** 2023-08-25
 **
 ** The author disclaims copyright to this source code.  In place of
 ** a legal notice, here is a blessing:
@@ -11,18 +11,16 @@
 *************************************************************************
 ** This file is part of the JNI bindings for the sqlite3 C API.
 */
-package org.sqlite.jni;
+package org.sqlite.jni.capi;
 
 /**
+   Callback for use with {@link CApi#sqlite3_preupdate_hook}.
 */
-public abstract class Collation {
+public interface PreupdateHookCallback extends CallbackProxy {
   /**
-     Must compare the given byte arrays using memcmp() semantics.
+     Must function as described for the C-level sqlite3_preupdate_hook()
+     callback.
   */
-  public abstract int xCompare(byte[] lhs, byte[] rhs);
-  /**
-     Called by SQLite when the collation is destroyed. If a Collation
-     requires custom cleanup, override this method.
-  */
-  public void xDestroy() {}
+  void call(sqlite3 db, int op, String dbName, String dbTable,
+            long iKey1, long iKey2 );
 }

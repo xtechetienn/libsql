@@ -12,16 +12,13 @@
 ** This file contains the main application entry pointer for the
 ** SQLTester framework.
 */
-package org.sqlite.jni.tester;
+package org.sqlite.jni.capi;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.nio.charset.StandardCharsets;
 import java.util.regex.*;
-import org.sqlite.jni.*;
-import static org.sqlite.jni.SQLite3Jni.*;
-import org.sqlite.jni.sqlite3;
-
+import static org.sqlite.jni.capi.CApi.*;
 
 /**
    Modes for how to escape (or not) column values and names from
@@ -150,14 +147,17 @@ class Outer {
 }
 
 /**
-   This class provides an application which aims to implement the
+   <p>This class provides an application which aims to implement the
    rudimentary SQL-driven test tool described in the accompanying
-   test-script-interpreter.md.
+   {@code test-script-interpreter.md}.
 
-   This is a work in progress.
+   <p>This class is an internal testing tool, not part of the public
+   interface but is (A) in the same package as the library because
+   access permissions require it to be so and (B) the JDK8 javadoc
+   offers no way to filter individual classes out of the doc
+   generation process (it can only exclude packages, but see (A)).
 
-
-   An instance of this application provides a core set of services
+   <p>An instance of this application provides a core set of services
    which TestScript instances use for processing testing logic.
    TestScripts, in turn, delegate the concrete test work to Command
    objects, which the TestScript parses on their behalf.
@@ -181,7 +181,7 @@ public class SQLTester {
   private int nTestFile = 0;
   //! Number of scripts which were aborted.
   private int nAbortedScript = 0;
-  //! Per-script test counter.
+  //! Incremented by test case handlers
   private int nTest = 0;
   //! True to enable column name output from execSql()
   private boolean emitColNames;
@@ -250,14 +250,14 @@ public class SQLTester {
   }
 
   public void runTests() throws Exception {
-    final long tStart = System.nanoTime();
+    final long tStart = System.currentTimeMillis();
     for(String f : listInFiles){
       reset();
       ++nTestFile;
       final TestScript ts = new TestScript(f);
       outln(nextStartEmoji(), " starting [",f,"]");
       boolean threw = false;
-      final long timeStart = System.nanoTime();
+      final long timeStart = System.currentTimeMillis();
       try{
         ts.run(this);
       }catch(SQLTesterException e){
@@ -267,14 +267,13 @@ public class SQLTester {
         if( keepGoing ) outln("Continuing anyway becaure of the keep-going option.");
         else if( e.isFatal() ) throw e;
       }finally{
-        final long timeEnd = System.nanoTime();
+        final long timeEnd = System.currentTimeMillis();
         outln("🏁",(threw ? "❌" : "✅")," ",nTest," test(s) in ",
-              ((timeEnd-timeStart)/1000000.0),"ms.");
-        //ts.getFilename());
+              (timeEnd-timeStart),"ms.");
       }
     }
-    final long tEnd = System.nanoTime();
-    outln("Total run-time: ",((tEnd-tStart)/1000000.0),"ms");
+    final long tEnd = System.currentTimeMillis();
+    outln("Total run-time: ",(tEnd-tStart),"ms");
     Util.unlink(initialDbName);
   }
 
@@ -336,7 +335,9 @@ public class SQLTester {
   }
 
   sqlite3 setCurrentDb(int n) throws Exception{
-    return affirmDbId(n).aDb[n];
+    affirmDbId(n);
+    iCurrentDb = n;
+    return this.aDb[n];
   }
 
   sqlite3 getCurrentDb(){ return aDb[iCurrentDb]; }
@@ -399,7 +400,7 @@ public class SQLTester {
     nullView = "nil";
     emitColNames = false;
     iCurrentDb = 0;
-    dbInitSql.append("SELECT 1;");
+    //dbInitSql.append("SELECT 1;");
   }
 
   void setNullValue(String v){nullView = v;}
@@ -456,7 +457,7 @@ public class SQLTester {
   }
 
   private void appendDbErr(sqlite3 db, StringBuilder sb, int rc){
-    sb.append(org.sqlite.jni.ResultCode.getEntryForInt(rc)).append(' ');
+    sb.append(org.sqlite.jni.capi.ResultCode.getEntryForInt(rc)).append(' ');
     final String msg = escapeSqlValue(sqlite3_errmsg(db));
     if( '{' == msg.charAt(0) ){
       sb.append(msg);
@@ -474,12 +475,12 @@ public class SQLTester {
      the db's result code.
 
      appendMode specifies how/whether to append results to the result
-     buffer. lineMode specifies whether to output all results in a
+     buffer. rowMode specifies whether to output all results in a
      single line or one line per row. If appendMode is
-     ResultBufferMode.NONE then lineMode is ignored and may be null.
+     ResultBufferMode.NONE then rowMode is ignored and may be null.
   */
   public int execSql(sqlite3 db, boolean throwOnError,
-                     ResultBufferMode appendMode, ResultRowMode lineMode,
+                     ResultBufferMode appendMode, ResultRowMode rowMode,
                      String sql) throws SQLTesterException {
     if( null==db && null==aDb[0] ){
       // Delay opening of the initial db to enable tests to change its
@@ -561,7 +562,7 @@ public class SQLTester {
                   throw new SQLTesterException("Unhandled ResultBufferMode: "+appendMode);
               }
             }
-            if( ResultRowMode.NEWLINE == lineMode ){
+            if( ResultRowMode.NEWLINE == rowMode ){
               spacing = 0;
               sb.append('\n');
             }
@@ -580,6 +581,10 @@ public class SQLTester {
         }
       }
     }finally{
+      sqlite3_reset(stmt
+        /* In order to trigger an exception in the
+           INSERT...RETURNING locking scenario:
+           https://sqlite.org/forum/forumpost/36f7a2e7494897df */);
       sqlite3_finalize(stmt);
     }
     if( 0!=rc && throwOnError ){
@@ -609,9 +614,9 @@ public class SQLTester {
       }
       t.addTestScript(a);
     }
-    final AutoExtension ax = new AutoExtension() {
+    final AutoExtensionCallback ax = new AutoExtensionCallback() {
         private final SQLTester tester = t;
-        public int xEntryPoint(sqlite3 db){
+        @Override public int call(sqlite3 db){
           final String init = tester.getDbInitSql();
           if( !init.isEmpty() ){
             tester.execSql(db, true, ResultBufferMode.NONE, null, init);
@@ -629,7 +634,7 @@ public class SQLTester {
         t.outln("Aborted ",t.nAbortedScript," script(s).");
       }
       if( dumpInternals ){
-        sqlite3_do_something_for_developer();
+        sqlite3_jni_internal_details();
       }
     }
   }
@@ -663,7 +668,7 @@ public class SQLTester {
   static {
     System.loadLibrary("sqlite3-jni")
       /* Interestingly, when SQLTester is the main app, we have to
-         load that lib from here. The same load from SQLite3Jni does
+         load that lib from here. The same load from CApi does
          not happen early enough. Without this,
          installCustomExtensions() is an unresolved symbol. */;
   }
@@ -924,8 +929,8 @@ class RunCommand extends Command {
     final sqlite3 db = (1==argv.length)
       ? t.getCurrentDb() : t.getDbById( Integer.parseInt(argv[1]) );
     final String sql = t.takeInputBuffer();
-    int rc = t.execSql(db, false, ResultBufferMode.NONE,
-                       ResultRowMode.ONELINE, sql);
+    final int rc = t.execSql(db, false, ResultBufferMode.NONE,
+                             ResultRowMode.ONELINE, sql);
     if( 0!=rc && t.isVerbose() ){
       String msg = sqlite3_errmsg(db);
       ts.verbose1(argv[0]," non-fatal command error #",rc,": ",
@@ -948,8 +953,7 @@ class TableResultCommand extends Command {
     if( !body.endsWith("\n--end") ){
       ts.toss(argv[0], " must be terminated with --end.");
     }else{
-      int n = body.length();
-      body = body.substring(0, n-6);
+      body = body.substring(0, body.length()-6);
     }
     final String[] globs = body.split("\\s*\\n\\s*");
     if( globs.length < 1 ){
@@ -1124,8 +1128,9 @@ class TestScript {
   }
 
   public String getOutputPrefix(){
-    String rc =  "["+(moduleName==null ? filename : moduleName)+"]";
+    String rc = "["+(moduleName==null ? "<unnamed>" : moduleName)+"]";
     if( null!=testCaseName ) rc += "["+testCaseName+"]";
+    if( null!=filename ) rc += "["+filename+"]";
     return rc + " line "+ cur.lineNo;
   }
 
@@ -1238,14 +1243,15 @@ class TestScript {
     final int oldPB = cur.putbackPos;
     final int oldPBL = cur.putbackLineNo;
     final int oldLine = cur.lineNo;
-    final String rc = getLine();
-    cur.peekedPos = cur.pos;
-    cur.peekedLineNo = cur.lineNo;
-    cur.pos = oldPos;
-    cur.lineNo = oldLine;
-    cur.putbackPos = oldPB;
-    cur.putbackLineNo = oldPBL;
-    return rc;
+    try{ return getLine(); }
+    finally{
+      cur.peekedPos = cur.pos;
+      cur.peekedLineNo = cur.lineNo;
+      cur.pos = oldPos;
+      cur.lineNo = oldLine;
+      cur.putbackPos = oldPB;
+      cur.putbackLineNo = oldPBL;
+    }
   }
 
   /**
@@ -1268,6 +1274,7 @@ class TestScript {
   }
 
   private boolean checkRequiredProperties(SQLTester t, String[] props) throws SQLTesterException{
+    if( true ) return false;
     int nOk = 0;
     for(String rp : props){
       verbose1("REQUIRED_PROPERTIES: ",rp);
@@ -1288,6 +1295,12 @@ class TestScript {
           t.appendDbInitSql("pragma temp_store=0;");
           ++nOk;
           break;
+        case "AUTOVACUUM":
+          t.appendDbInitSql("pragma auto_vacuum=full;");
+          ++nOk;
+        case "INCRVACUUM":
+          t.appendDbInitSql("pragma auto_vacuum=incremental;");
+          ++nOk;
         default:
           break;
       }
@@ -1326,9 +1339,9 @@ class TestScript {
     m = patternRequiredProperties.matcher(line);
     if( m.find() ){
       final String rp = m.group(1);
-      //if( ! checkRequiredProperties( tester, rp.split("\\s+") ) ){
-      throw new IncompatibleDirective(this, "REQUIRED_PROPERTIES: "+rp);
-      //}
+      if( ! checkRequiredProperties( tester, rp.split("\\s+") ) ){
+        throw new IncompatibleDirective(this, "REQUIRED_PROPERTIES: "+rp);
+      }
     }
     m = patternMixedModuleName.matcher(line);
     if( m.find() ){
@@ -1372,11 +1385,10 @@ class TestScript {
     String line;
     while( (null != (line = peekLine())) ){
       checkForDirective(tester, line);
-      if( !isCommandLine(line, true) ){
+      if( isCommandLine(line, true) ) break;
+      else {
         sb.append(line).append("\n");
         consumePeeked();
-      }else{
-        break;
       }
     }
     line = sb.toString();

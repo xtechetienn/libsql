@@ -11,7 +11,7 @@
 *************************************************************************
 ** This file is part of the JNI bindings for the sqlite3 C API.
 */
-package org.sqlite.jni;
+package org.sqlite.jni.capi;
 
 /**
    A wrapper for communicating C-level (sqlite3_stmt*) instances with
@@ -19,7 +19,12 @@ package org.sqlite.jni;
    simply provide a type-safe way to communicate it between Java and C
    via JNI.
 */
-public final class sqlite3_stmt extends NativePointerHolder<sqlite3_stmt> {
+public final class sqlite3_stmt extends NativePointerHolder<sqlite3_stmt>
+  implements AutoCloseable {
   // Only invoked from JNI.
   private sqlite3_stmt(){}
+
+  @Override public void close(){
+    CApi.sqlite3_finalize(this.clearNativePointer());
+  }
 }
