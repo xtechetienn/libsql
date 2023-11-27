@@ -4154,14 +4154,14 @@ SQLITE_API int sqlite3_open_v2(
   const char *zVfs        /* Name of VFS module to use */
 );
 
-typedef struct libsql_create_wal libsql_create_wal;
+typedef struct libsql_wal_manager libsql_wal_manager;
 
 SQLITE_API int libsql_open(
   const char *filename,   /* Database filename (UTF-8) */
   sqlite3 **ppDb,         /* OUT: SQLite db handle */
   int flags,              /* Flags */
   const char *zVfs,       /* Name of VFS module to use, NULL for default */
-  libsql_create_wal create_wal   /* create_wal instance, in charge of instanciating a wal */
+  libsql_wal_manager wal_manager   /* wal_manager instance, in charge of instanciating a wal */
 );
 
 SQLITE_API LIBSQL_API int libsql_try_initialize_wasm_func_table(sqlite3 *db);
@@ -13813,10 +13813,10 @@ typedef struct libsql_pghdr libsql_pghdr;
 ** There is one object of this type for each pager.
 */
 typedef struct libsql_wal libsql_wal;
-typedef struct libsql_create_wal libsql_create_wal;
+typedef struct libsql_wal_manager libsql_wal_manager;
 /* Opaque types for wal method data */
 typedef struct wal_impl wal_impl;
-typedef struct create_wal_impl create_wal_impl;
+typedef struct wal_manager_impl wal_manager_impl;
 
 typedef struct libsql_wal_methods {
   int iVersion; /* Current version is 1, versioning is here for backward compatibility */
@@ -13948,22 +13948,22 @@ struct WalIndexHdr {
   unsigned int aCksum[2];                  /* Checksum over all prior fields */
 };
 
-struct libsql_create_wal {
+struct libsql_wal_manager {
   /* True if the implementation relies on shared memory routines (e.g. locks) */
   int bUsesShm;
 
   /* Open and close a connection to a write-ahead log. */
-  int (*xOpen)(create_wal_impl* pData, sqlite3_vfs*, sqlite3_file*, int no_shm_mode, long long max_size, const char* zMainDbFileName, libsql_wal* out_wal);
-  int (*xClose)(create_wal_impl* pData, wal_impl* pWal, sqlite3* db, int sync_flags, int nBuf, unsigned char *zBuf);
+  int (*xOpen)(wal_manager_impl* pData, sqlite3_vfs*, sqlite3_file*, int no_shm_mode, long long max_size, const char* zMainDbFileName, libsql_wal* out_wal);
+  int (*xClose)(wal_manager_impl* pData, wal_impl* pWal, sqlite3* db, int sync_flags, int nBuf, unsigned char *zBuf);
 
   /* destroy resources for this wal */
-  int (*xLogDestroy)(create_wal_impl* pData, sqlite3_vfs *vfs, const char* zMainDbFileName);
+  int (*xLogDestroy)(wal_manager_impl* pData, sqlite3_vfs *vfs, const char* zMainDbFileName);
   /* returns whether this wal exists */
-  int (*xLogExists)(create_wal_impl* pData, sqlite3_vfs *vfs, const char* zMainDbFileName, int* exist);
+  int (*xLogExists)(wal_manager_impl* pData, sqlite3_vfs *vfs, const char* zMainDbFileName, int* exist);
   /* destructor */
-  void (*xDestroy)(create_wal_impl* pData);
+  void (*xDestroy)(wal_manager_impl* pData);
 
-  create_wal_impl* pData;
+  wal_manager_impl* pData;
 };
 
 /*
@@ -14005,16 +14005,16 @@ struct libsql_wal {
     wal_impl* pData; /* methods receiver */
 };
 
-typedef struct RefCountCreateWal {
+typedef struct RefCountedWalManager {
     int n;
-    libsql_create_wal ref;
-} RefCountCreateWal;
+    libsql_wal_manager ref;
+} RefCountedWalManager;
 
-int make_ref_counted_create_wal(libsql_create_wal create_wal, RefCountCreateWal **out);
-void destroy_create_wal(RefCountCreateWal *p);
-RefCountCreateWal* clone_create_wal(RefCountCreateWal *p);
+int make_ref_counted_wal_manager(libsql_wal_manager wal_manager, RefCountedWalManager **out);
+void destroy_wal_manager(RefCountedWalManager *p);
+RefCountedWalManager* clone_wal_manager(RefCountedWalManager *p);
 
-SQLITE_API extern libsql_create_wal sqlite3_create_wal;
+SQLITE_API extern libsql_wal_manager sqlite3_wal_manager;
 
 #endif /* SQLITE_WAL_H */
 
@@ -16201,7 +16201,7 @@ typedef struct libsql_wal_methods libsql_wal_methods;
 /* Open and close a Pager connection. */
 SQLITE_PRIVATE int sqlite3PagerOpen(
   sqlite3_vfs*,
-  RefCountCreateWal*,
+  RefCountedWalManager*,
   Pager **ppPager,
   const char*,
   int,
@@ -18121,7 +18121,7 @@ struct sqlite3 {
   libsql_wasm_ctx wasm;        /* WebAssembly runtime context */
 #endif
 #ifndef SQLITE_OMIT_WAL
-  RefCountCreateWal *create_wal;
+  RefCountedWalManager *wal_manager;
 #endif
   void *pCloseArg;                 /* First argument to xCloseCallback */
   void (*xCloseCallback)(          /* Registered using sqlite3_close_hook() */
@@ -56837,10 +56837,10 @@ SQLITE_PRIVATE int sqlite3RowSetTest(RowSet *pRowSet, int iBatch, sqlite3_int64 
 ** There is one object of this type for each pager.
 */
 typedef struct libsql_wal libsql_wal;
-typedef struct libsql_create_wal libsql_create_wal;
+typedef struct libsql_wal_manager libsql_wal_manager;
 /* Opaque types for wal method data */
 typedef struct wal_impl wal_impl;
-typedef struct create_wal_impl create_wal_impl;
+typedef struct wal_manager_impl wal_manager_impl;
 
 typedef struct libsql_wal_methods {
   int iVersion; /* Current version is 1, versioning is here for backward compatibility */
@@ -56972,22 +56972,22 @@ struct WalIndexHdr {
   unsigned int aCksum[2];                  /* Checksum over all prior fields */
 };
 
-struct libsql_create_wal {
+struct libsql_wal_manager {
   /* True if the implementation relies on shared memory routines (e.g. locks) */
   int bUsesShm;
 
   /* Open and close a connection to a write-ahead log. */
-  int (*xOpen)(create_wal_impl* pData, sqlite3_vfs*, sqlite3_file*, int no_shm_mode, long long max_size, const char* zMainDbFileName, libsql_wal* out_wal);
-  int (*xClose)(create_wal_impl* pData, wal_impl* pWal, sqlite3* db, int sync_flags, int nBuf, unsigned char *zBuf);
+  int (*xOpen)(wal_manager_impl* pData, sqlite3_vfs*, sqlite3_file*, int no_shm_mode, long long max_size, const char* zMainDbFileName, libsql_wal* out_wal);
+  int (*xClose)(wal_manager_impl* pData, wal_impl* pWal, sqlite3* db, int sync_flags, int nBuf, unsigned char *zBuf);
 
   /* destroy resources for this wal */
-  int (*xLogDestroy)(create_wal_impl* pData, sqlite3_vfs *vfs, const char* zMainDbFileName);
+  int (*xLogDestroy)(wal_manager_impl* pData, sqlite3_vfs *vfs, const char* zMainDbFileName);
   /* returns whether this wal exists */
-  int (*xLogExists)(create_wal_impl* pData, sqlite3_vfs *vfs, const char* zMainDbFileName, int* exist);
+  int (*xLogExists)(wal_manager_impl* pData, sqlite3_vfs *vfs, const char* zMainDbFileName, int* exist);
   /* destructor */
-  void (*xDestroy)(create_wal_impl* pData);
+  void (*xDestroy)(wal_manager_impl* pData);
 
-  create_wal_impl* pData;
+  wal_manager_impl* pData;
 };
 
 /*
@@ -57029,16 +57029,16 @@ struct libsql_wal {
     wal_impl* pData; /* methods receiver */
 };
 
-typedef struct RefCountCreateWal {
+typedef struct RefCountedWalManager {
     int n;
-    libsql_create_wal ref;
-} RefCountCreateWal;
+    libsql_wal_manager ref;
+} RefCountedWalManager;
 
-int make_ref_counted_create_wal(libsql_create_wal create_wal, RefCountCreateWal **out);
-void destroy_create_wal(RefCountCreateWal *p);
-RefCountCreateWal* clone_create_wal(RefCountCreateWal *p);
+int make_ref_counted_wal_manager(libsql_wal_manager wal_manager, RefCountedWalManager **out);
+void destroy_wal_manager(RefCountedWalManager *p);
+RefCountedWalManager* clone_wal_manager(RefCountedWalManager *p);
 
-SQLITE_API extern libsql_create_wal sqlite3_create_wal;
+SQLITE_API extern libsql_wal_manager sqlite3_wal_manager;
 
 #endif /* SQLITE_WAL_H */
 
@@ -57720,7 +57720,7 @@ struct Pager {
   char *pTmpSpace;            /* Pager.pageSize bytes of space for tmp use */
   PCache *pPCache;            /* Pointer to page cache object */
 #ifndef SQLITE_OMIT_WAL
-  RefCountCreateWal* create_wal;
+  RefCountedWalManager* wal_manager;
   libsql_wal wal;
 #endif
 };
@@ -60368,7 +60368,7 @@ static int pagerOpenWalIfPresent(Pager *pPager){
 
   if( !pPager->tempFile ){
     int isWal;                    /* True if WAL file exists */
-    rc =pPager->create_wal->ref.xLogExists(pPager->create_wal->ref.pData, pPager->pVfs, pPager->zFilename, &isWal);
+    rc =pPager->wal_manager->ref.xLogExists(pPager->wal_manager->ref.pData, pPager->pVfs, pPager->zFilename, &isWal);
     if( rc==SQLITE_OK ){
       if( isWal ){
         Pgno nPage;                   /* Size of the database file */
@@ -60376,7 +60376,7 @@ static int pagerOpenWalIfPresent(Pager *pPager){
         rc = pagerPagecount(pPager, &nPage);
         if( rc ) return rc;
         if( nPage==0 ){
-          rc = pPager->create_wal->ref.xLogDestroy(pPager->create_wal->ref.pData, pPager->pVfs, pPager->zFilename);
+          rc = pPager->wal_manager->ref.xLogDestroy(pPager->wal_manager->ref.pData, pPager->pVfs, pPager->zFilename);
         }else{
           testcase( sqlite3PcachePagecount(pPager->pPCache)==0 );
           rc = sqlite3PagerOpenWal(pPager, 0);
@@ -61203,10 +61203,10 @@ SQLITE_PRIVATE int sqlite3PagerClose(Pager *pPager, sqlite3 *db){
       a = pTmp;
     }
     if (pagerUseWal(pPager)) {
-      pPager->create_wal->ref.xClose(pPager->create_wal->ref.pData, pPager->wal.pData, db, pPager->walSyncFlags, pPager->pageSize,a);
+      pPager->wal_manager->ref.xClose(pPager->wal_manager->ref.pData, pPager->wal.pData, db, pPager->walSyncFlags, pPager->pageSize,a);
       memset((void*)&(pPager->wal), 0, sizeof(libsql_wal));
     }
-    destroy_create_wal(pPager->create_wal);
+    destroy_wal_manager(pPager->wal_manager);
   }
 #endif
   pager_reset(pPager);
@@ -61746,7 +61746,7 @@ SQLITE_PRIVATE int sqlite3PagerFlush(Pager *pPager){
 */
 SQLITE_PRIVATE int sqlite3PagerOpen(
   sqlite3_vfs *pVfs,       /* The virtual file system to use */
-  RefCountCreateWal *create_wal, /* WAL methods to use */
+  RefCountedWalManager *wal_manager, /* WAL methods to use */
   Pager **ppPager,         /* OUT: Return the Pager structure here */
   const char *zFilename,   /* Name of the database file to open */
   int nExtra,              /* Extra bytes append to each in-memory page */
@@ -61901,7 +61901,7 @@ SQLITE_PRIVATE int sqlite3PagerOpen(
   pPager->fd = (sqlite3_file*)pPtr;       pPtr += ROUND8(pVfs->szOsFile);
   pPager->sjfd = (sqlite3_file*)pPtr;     pPtr += journalFileSize;
   pPager->jfd =  (sqlite3_file*)pPtr;     pPtr += journalFileSize;
-  pPager->create_wal = clone_create_wal(create_wal);
+  pPager->wal_manager = clone_wal_manager(wal_manager);
   assert( EIGHT_BYTE_ALIGNMENT(pPager->jfd) );
   memcpy(pPtr, &pPager, SQLITE_PTRSIZE);  pPtr += SQLITE_PTRSIZE;
 
@@ -62031,7 +62031,7 @@ act_like_temp_file:
   if( rc!=SQLITE_OK ){
     sqlite3OsClose(pPager->fd);
     sqlite3PageFree(pPager->pTmpSpace);
-    destroy_create_wal(pPager->create_wal);
+    destroy_wal_manager(pPager->wal_manager);
     sqlite3_free(pPager);
     return rc;
   }
@@ -64577,7 +64577,7 @@ SQLITE_PRIVATE int sqlite3PagerWalCallback(Pager *pPager){
 SQLITE_PRIVATE int sqlite3PagerWalSupported(Pager *pPager){
   const sqlite3_io_methods *pMethods = pPager->fd->pMethods;
   if( pPager->noLock ) return 0;
-  return pPager->exclusiveMode || (pPager->create_wal->ref.bUsesShm == 0) || (pMethods->iVersion>=2 && pMethods->xShmMap);
+  return pPager->exclusiveMode || (pPager->wal_manager->ref.bUsesShm == 0) || (pMethods->iVersion>=2 && pMethods->xShmMap);
 }
 
 /*
@@ -64625,7 +64625,7 @@ static int pagerOpenWal(Pager *pPager){
   ** (e.g. due to malloc() failure), return an error code.
   */
   if( rc==SQLITE_OK ){
-    rc = pPager->create_wal->ref.xOpen(pPager->create_wal->ref.pData, pPager->pVfs,
+    rc = pPager->wal_manager->ref.xOpen(pPager->wal_manager->ref.pData, pPager->pVfs,
         pPager->fd, pPager->exclusiveMode,
         pPager->journalSizeLimit, pPager->zFilename, &(pPager->wal)
     );
@@ -64703,7 +64703,7 @@ SQLITE_PRIVATE int sqlite3PagerCloseWal(Pager *pPager, sqlite3 *db){
     int logexists = 0;
     rc = pagerLockDb(pPager, SHARED_LOCK);
     if( rc==SQLITE_OK ){
-      rc = pPager->create_wal->ref.xLogExists(pPager->create_wal->ref.pData, pPager->pVfs, pPager->zFilename, &logexists);
+      rc = pPager->wal_manager->ref.xLogExists(pPager->wal_manager->ref.pData, pPager->pVfs, pPager->zFilename, &logexists);
     }
     if( rc==SQLITE_OK && logexists ){
       rc = pagerOpenWal(pPager);
@@ -64716,7 +64716,7 @@ SQLITE_PRIVATE int sqlite3PagerCloseWal(Pager *pPager, sqlite3 *db){
   if( rc==SQLITE_OK && pagerUseWal(pPager) ){
     rc = pagerExclusiveLock(pPager);
     if( rc==SQLITE_OK ){
-      rc = pPager->create_wal->ref.xClose(pPager->create_wal->ref.pData, pPager->wal.pData, db, pPager->walSyncFlags,
+      rc = pPager->wal_manager->ref.xClose(pPager->wal_manager->ref.pData, pPager->wal.pData, db, pPager->walSyncFlags,
                            pPager->pageSize, (u8*)pPager->pTmpSpace);
       memset(&(pPager->wal), 0, sizeof(libsql_wal));
       pagerFixMaplimit(pPager);
@@ -69201,20 +69201,20 @@ static int sqlite3WalOpen(
 
 SQLITE_PRIVATE void sqlite3DestroyCreateWal(void *self) { }
 
-int make_ref_counted_create_wal(libsql_create_wal create_wal, RefCountCreateWal **out) {
-    RefCountCreateWal *p = (RefCountCreateWal*)sqlite3MallocZero(sizeof(RefCountCreateWal));
+int make_ref_counted_wal_manager(libsql_wal_manager wal_manager, RefCountedWalManager **out) {
+    RefCountedWalManager *p = (RefCountedWalManager*)sqlite3MallocZero(sizeof(RefCountedWalManager));
     if (!p) return SQLITE_NOMEM;
     p->n = 1;
-    p->ref = create_wal;
+    p->ref = wal_manager;
     *out = p;
     return SQLITE_OK;
 }
 
 /*
- * Decrease the ref count and call the create_wal destructor when the count reaches 0.
+ * Decrease the ref count and call the wal_manager destructor when the count reaches 0.
  * Must be called from withing a critical section.
  */
-void destroy_create_wal(RefCountCreateWal *p) {
+void destroy_wal_manager(RefCountedWalManager *p) {
     assert(p->n != 0);
     p->n -= 1;
     if (p->n == 0) {
@@ -69228,20 +69228,20 @@ void destroy_create_wal(RefCountCreateWal *p) {
  * Must be called from withing a critical section.
  * Return NULL if the passed pointer ref count is already 0.
  */
-RefCountCreateWal* clone_create_wal(RefCountCreateWal *p) {
+RefCountedWalManager* clone_wal_manager(RefCountedWalManager *p) {
     assert(p->n != 0);
     p->n += 1;
     return p;
 }
 
-SQLITE_API libsql_create_wal sqlite3_create_wal = {
+SQLITE_API libsql_wal_manager sqlite3_wal_manager = {
     .pData = NULL,
-    .xOpen = (int (*)(create_wal_impl *, sqlite3_vfs *, sqlite3_file *, int, long long, const char*, libsql_wal *))sqlite3WalOpen,
-    .xClose = (int (*)(create_wal_impl *, wal_impl *, sqlite3 *, int, int, unsigned char *))sqlite3WalClose,
+    .xOpen = (int (*)(wal_manager_impl *, sqlite3_vfs *, sqlite3_file *, int, long long, const char*, libsql_wal *))sqlite3WalOpen,
+    .xClose = (int (*)(wal_manager_impl *, wal_impl *, sqlite3 *, int, int, unsigned char *))sqlite3WalClose,
     .bUsesShm = 1,
-    .xLogDestroy = (int (*)(create_wal_impl *, sqlite3_vfs*, const char*))sqlite3LogDestroy,
-    .xLogExists = (int (*)(create_wal_impl *, sqlite3_vfs*, const char*, int *))sqlite3LogExists,
-    .xDestroy =(void (*)(create_wal_impl*))sqlite3DestroyCreateWal,
+    .xLogDestroy = (int (*)(wal_manager_impl *, sqlite3_vfs*, const char*))sqlite3LogDestroy,
+    .xLogExists = (int (*)(wal_manager_impl *, sqlite3_vfs*, const char*, int *))sqlite3LogExists,
+    .xDestroy =(void (*)(wal_manager_impl*))sqlite3DestroyCreateWal,
 };
 
 typedef struct wal_impl wal_impl;
@@ -72922,7 +72922,7 @@ SQLITE_PRIVATE int sqlite3BtreeOpen(
       rc = SQLITE_NOMEM_BKPT;
       goto btree_open_out;
     }
-    rc = sqlite3PagerOpen(pVfs, db->create_wal ,&pBt->pPager, zFilename,
+    rc = sqlite3PagerOpen(pVfs, db->wal_manager ,&pBt->pPager, zFilename,
                           sizeof(MemPage), flags, vfsFlags, pageReinit);
     if( rc==SQLITE_OK ){
       sqlite3PagerSetMmapLimit(pBt->pPager, db->szMmap);
@@ -180328,7 +180328,7 @@ SQLITE_PRIVATE void sqlite3LeaveMutexAndCloseZombie(sqlite3 *db){
   }
 
   /* Destroy the create wal */
-  destroy_create_wal(db->create_wal);
+  destroy_wal_manager(db->wal_manager);
 
   sqlite3_free(db);
 }
@@ -182125,7 +182125,7 @@ static int openDatabase(
   sqlite3 **ppDb,               /* OUT: Returned database handle */
   unsigned int flags,           /* Operational flags */
   const char *zVfs,             /* Name of the VFS to use */
-  libsql_create_wal create_wal  /* Pointer to the user data*/
+  libsql_wal_manager wal_manager  /* wal manager implementation */
 ){
   sqlite3 *db;                    /* Store allocated handle here */
   int rc;                         /* Return code */
@@ -182185,10 +182185,10 @@ static int openDatabase(
   /* Allocate the sqlite data structure */
   db = sqlite3MallocZero( sizeof(sqlite3) );
   if( db==0 ) goto opendb_out;
-  rc = make_ref_counted_create_wal(create_wal, &(db->create_wal));
+  rc = make_ref_counted_wal_manager(wal_manager, &(db->wal_manager));
   if (rc) {
       sqlite3_free(db);
-      create_wal.xDestroy(create_wal.pData);
+      wal_manager.xDestroy(wal_manager.pData);
       db = 0;
       rc = SQLITE_NOMEM;
       goto opendb_out;
@@ -182200,8 +182200,8 @@ static int openDatabase(
   ){
     db->mutex = sqlite3MutexAlloc(SQLITE_MUTEX_RECURSIVE);
     if( db->mutex==0 ){
-      create_wal.xDestroy(create_wal.pData);
-      sqlite3_free(db->create_wal);
+      wal_manager.xDestroy(wal_manager.pData);
+      sqlite3_free(db->wal_manager);
       sqlite3_free(db);
       db = 0;
       goto opendb_out;
@@ -182493,7 +182493,7 @@ SQLITE_API int sqlite3_open(
   sqlite3 **ppDb
 ){
   return openDatabase(zFilename, ppDb,
-                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL, sqlite3_create_wal);
+                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL, sqlite3_wal_manager);
 }
 SQLITE_API int sqlite3_open_v2(
   const char *filename,   /* Database filename (UTF-8) */
@@ -182501,7 +182501,7 @@ SQLITE_API int sqlite3_open_v2(
   int flags,              /* Flags */
   const char *zVfs        /* Name of VFS module to use */
 ){
-  return openDatabase(filename, ppDb, (unsigned int)flags, zVfs, sqlite3_create_wal);
+  return openDatabase(filename, ppDb, (unsigned int)flags, zVfs, sqlite3_wal_manager);
 }
 
 int libsql_open(
@@ -182509,9 +182509,9 @@ int libsql_open(
   sqlite3 **ppDb,         /* OUT: SQLite db handle */
   int flags,              /* Flags */
   const char *zVfs,       /* Name of VFS module to use, NULL for default */
-  libsql_create_wal create_wal   /* create_wal instance, in charge of instanciating a wal */
+  libsql_wal_manager wal_manager   /* wal_manager implemetation */
 ) {
-  return openDatabase(filename, ppDb, (unsigned int)flags, zVfs, create_wal);
+  return openDatabase(filename, ppDb, (unsigned int)flags, zVfs, wal_manager);
 }
 
 #ifndef SQLITE_OMIT_UTF16
@@ -182540,7 +182540,7 @@ SQLITE_API int sqlite3_open16(
   zFilename8 = sqlite3ValueText(pVal, SQLITE_UTF8);
   if( zFilename8 ){
     rc = openDatabase(zFilename8, ppDb,
-                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL, sqlite3_create_wal);
+                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL, sqlite3_wal_manager);
     assert( *ppDb || rc==SQLITE_NOMEM );
     if( rc==SQLITE_OK && !DbHasProperty(*ppDb, 0, DB_SchemaLoaded) ){
       SCHEMA_ENC(*ppDb) = ENC(*ppDb) = SQLITE_UTF16NATIVE;
