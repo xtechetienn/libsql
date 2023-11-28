@@ -28,11 +28,6 @@
 **    configure
 **    configure.ac
 **    ext/wasm/GNUmakefile
-**    ext/wasm/SQLTester/GNUmakefile
-**    ext/wasm/SQLTester/SQLTester.mjs
-**    ext/wasm/SQLTester/SQLTester.run.mjs
-**    ext/wasm/SQLTester/index.html
-**    ext/wasm/SQLTester/touint8array.c
 **    ext/wasm/fiddle.make
 **    ext/wasm/fiddle/fiddle-worker.js
 **    ext/wasm/fiddle/fiddle.js
