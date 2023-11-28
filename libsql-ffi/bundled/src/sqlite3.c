@@ -14011,6 +14011,7 @@ typedef struct RefCountedWalManager {
 } RefCountedWalManager;
 
 int make_ref_counted_wal_manager(libsql_wal_manager wal_manager, RefCountedWalManager **out);
+int make_ref_counted_wal_manager_static(libsql_wal_manager wal_manager, RefCountedWalManager **out);
 void destroy_wal_manager(RefCountedWalManager *p);
 RefCountedWalManager* clone_wal_manager(RefCountedWalManager *p);
 
@@ -57035,6 +57036,7 @@ typedef struct RefCountedWalManager {
 } RefCountedWalManager;
 
 int make_ref_counted_wal_manager(libsql_wal_manager wal_manager, RefCountedWalManager **out);
+int make_ref_counted_wal_manager_static(libsql_wal_manager wal_manager, RefCountedWalManager **out);
 void destroy_wal_manager(RefCountedWalManager *p);
 RefCountedWalManager* clone_wal_manager(RefCountedWalManager *p);
 
@@ -182121,10 +182123,10 @@ static const char *uriParameter(const char *zFilename, const char *zParam){
 ** is UTF-8 encoded.
 */
 static int openDatabase(
-  const char *zFilename,        /* Database filename UTF-8 encoded */
-  sqlite3 **ppDb,               /* OUT: Returned database handle */
-  unsigned int flags,           /* Operational flags */
-  const char *zVfs,             /* Name of the VFS to use */
+  const char *zFilename,          /* Database filename UTF-8 encoded */
+  sqlite3 **ppDb,                 /* OUT: Returned database handle */
+  unsigned int flags,             /* Operational flags */
+  const char *zVfs,               /* Name of the VFS to use */
   libsql_wal_manager wal_manager  /* wal manager implementation */
 ){
   sqlite3 *db;                    /* Store allocated handle here */
