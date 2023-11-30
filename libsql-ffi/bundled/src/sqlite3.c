@@ -14028,7 +14028,7 @@ int make_ref_counted_wal_manager(libsql_wal_manager wal_manager, RefCountedWalMa
 void destroy_wal_manager(RefCountedWalManager *p);
 RefCountedWalManager* clone_wal_manager(RefCountedWalManager *p);
 
-void make_sqlite3_wal_manager_rc(RefCountedWalManager **out);
+RefCountedWalManager *make_sqlite3_wal_manager_rc();
 
 SQLITE_API extern const libsql_wal_manager sqlite3_wal_manager;
 
@@ -57053,7 +57053,7 @@ int make_ref_counted_wal_manager(libsql_wal_manager wal_manager, RefCountedWalMa
 void destroy_wal_manager(RefCountedWalManager *p);
 RefCountedWalManager* clone_wal_manager(RefCountedWalManager *p);
 
-void make_sqlite3_wal_manager_rc(RefCountedWalManager **out);
+RefCountedWalManager *make_sqlite3_wal_manager_rc();
 
 SQLITE_API extern const libsql_wal_manager sqlite3_wal_manager;
 
@@ -69055,21 +69055,19 @@ static int libsqlMakeWalPathname(const char *main_db_path_name, char **out) {
 SQLITE_PRIVATE int sqlite3LogExists(wal_manager_impl* self, sqlite3_vfs *vfs, const char *main_db_path_name, int *exists) {
     char *zWal;
     int rc = libsqlMakeWalPathname(main_db_path_name, &zWal);
-    if (rc != 0) return rc;
+    if (rc != SQLITE_OK) return rc;
     rc = sqlite3OsAccess(vfs, zWal, SQLITE_ACCESS_EXISTS, exists);
     sqlite3_free(zWal);
-    if (rc != 0) return rc;
-    return SQLITE_OK;
+    return rc;
 }
 
 SQLITE_PRIVATE int sqlite3LogDestroy(wal_manager_impl* self, sqlite3_vfs *vfs, const char *main_db_path_name) {
     char *zWal;
     int rc = libsqlMakeWalPathname(main_db_path_name, &zWal);
-    if (rc != 0) return rc;
+    if (rc != SQLITE_OK) return rc;
     rc = sqlite3OsDelete(vfs, zWal, 0);
     sqlite3_free(zWal);
-    if (rc != 0) return rc;
-    return SQLITE_OK;
+    return rc;
 }
 
 /*
@@ -69277,7 +69275,7 @@ SQLITE_API const libsql_wal_manager sqlite3_wal_manager = {
     .xDestroy =(void (*)(wal_manager_impl*))sqlite3DestroyWalManager,
 };
 
-void make_sqlite3_wal_manager_rc(RefCountedWalManager **out) {
+RefCountedWalManager *make_sqlite3_wal_manager_rc() {
     static int initialized = 0;
     static RefCountedWalManager manager = { 0 };
     /*
@@ -69290,7 +69288,7 @@ void make_sqlite3_wal_manager_rc(RefCountedWalManager **out) {
         initialized = 1;
     }
 
-    *out = &manager;
+    return &manager;
 }
 
 typedef struct wal_impl wal_impl;
@@ -180376,7 +180374,6 @@ SQLITE_PRIVATE void sqlite3LeaveMutexAndCloseZombie(sqlite3 *db){
     sqlite3_free(db->lookaside.pStart);
   }
 
-  /* Destroy the create wal */
   destroy_wal_manager(db->wal_manager);
 
   sqlite3_free(db);
@@ -182534,10 +182531,8 @@ SQLITE_API int sqlite3_open(
   const char *zFilename,
   sqlite3 **ppDb
 ){
-  RefCountedWalManager *wal;
-  make_sqlite3_wal_manager_rc(&wal);
   return openDatabase(zFilename, ppDb,
-                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL, wal);
+                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL, make_sqlite3_wal_manager_rc());
 }
 SQLITE_API int sqlite3_open_v2(
   const char *filename,   /* Database filename (UTF-8) */
@@ -182545,9 +182540,7 @@ SQLITE_API int sqlite3_open_v2(
   int flags,              /* Flags */
   const char *zVfs        /* Name of VFS module to use */
 ){
-  RefCountedWalManager *wal;
-  make_sqlite3_wal_manager_rc(&wal);
-  return openDatabase(filename, ppDb, (unsigned int)flags, zVfs, wal);
+  return openDatabase(filename, ppDb, (unsigned int)flags, zVfs, make_sqlite3_wal_manager_rc());
 }
 
 /* deprecated, only works with zWal == NULL */
@@ -182558,10 +182551,8 @@ int libsql_open(
   const char *zVfs,       /* Name of VFS module to use, NULL for default */
   const char *zWal        /* Name of WAL module to use */
 ) {
-  assert( zWal == NULL );;
-  RefCountedWalManager *wal;
-  make_sqlite3_wal_manager_rc(&wal);
-  return openDatabase(filename, ppDb, (unsigned int)flags, zVfs, wal);
+  assert( zWal == NULL );
+  return openDatabase(filename, ppDb, (unsigned int)flags, zVfs, make_sqlite3_wal_manager_rc());
 }
 
 /* deprecated, only works with zWal == NULL */
@@ -182573,10 +182564,8 @@ int libsql_open_v2(
   const char *zWal,       /* Name of WAL module to use */
   void* pWalMethodsData   /* User data, passed to the libsql_wal struct*/
 ) {
-  assert( zWal == NULL );;
-  RefCountedWalManager *wal;
-  make_sqlite3_wal_manager_rc(&wal);
-  return openDatabase(filename, ppDb, (unsigned int)flags, zVfs, wal);
+  assert( zWal == NULL );
+  return openDatabase(filename, ppDb, (unsigned int)flags, zVfs, make_sqlite3_wal_manager_rc());
 }
 
 int libsql_open_v3(
@@ -182586,7 +182575,7 @@ int libsql_open_v3(
   const char *zVfs,       /* Name of VFS module to use, NULL for default */
   libsql_wal_manager wal_manager   /* wal_manager implemetation */
   ) {
-    RefCountedWalManager *wal_manager_rc        ;
+    RefCountedWalManager *wal_manager_rc;
     int rc = make_ref_counted_wal_manager(wal_manager, &wal_manager_rc);
     if (rc) {
         wal_manager.xDestroy(wal_manager.pData);
@@ -182620,10 +182609,8 @@ SQLITE_API int sqlite3_open16(
   sqlite3ValueSetStr(pVal, -1, zFilename, SQLITE_UTF16NATIVE, SQLITE_STATIC);
   zFilename8 = sqlite3ValueText(pVal, SQLITE_UTF8);
   if( zFilename8 ){
-    RefCountedWalManager *wal;
-    make_sqlite3_wal_manager_rc(&wal);
     rc = openDatabase(zFilename8, ppDb,
-                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL, wal);
+                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL, make_sqlite3_wal_manager_rc());
     assert( *ppDb || rc==SQLITE_NOMEM );
     if( rc==SQLITE_OK && !DbHasProperty(*ppDb, 0, DB_SchemaLoaded) ){
       SCHEMA_ENC(*ppDb) = ENC(*ppDb) = SQLITE_UTF16NATIVE;
