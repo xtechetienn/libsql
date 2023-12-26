@@ -57739,6 +57739,10 @@ struct Pager {
 #ifndef SQLITE_OMIT_WAL
   RefCountedWalManager* wal_manager;
   libsql_wal *wal;
+  char *zWal;                 /* Name of the WAL file:
+                                FIXME: to remove, and be handled by virtual WAL.
+                                We leave it temporarily to keep sqlite3_filename_wal working
+                              */
 #endif
 };
 
@@ -61906,6 +61910,7 @@ SQLITE_PRIVATE int sqlite3PagerOpen(
     4 +                                  /* Database prefix */
     nPathname + 1 +                      /* database filename */
     nUriByte +                           /* query parameters */
+    nPathname + 4 + 1 +                  /* WAL filename (FIXME: move to virtual WAL) */
     nPathname + 8 + 1 +                  /* Journal filename */
     3                                    /* Terminator */
   );
@@ -61948,6 +61953,23 @@ SQLITE_PRIVATE int sqlite3PagerOpen(
   }else{
     pPager->zJournal = 0;
   }
+
+  /* Fill in Pager.zWal: FIXME: it will make sqlite3_filename_database work for regular WAL,
+     but those routines need to be rewritten to take virtual WAL into account. */
+#ifndef SQLITE_OMIT_WAL
+  /* Fill in Pager.zWal */
+  if( nPathname>0 ){
+    pPager->zWal = (char*)pPtr;
+    memcpy(pPtr, zPathname, nPathname);   pPtr += nPathname;
+    memcpy(pPtr, "-wal", 4);              pPtr += 4 + 1;
+#ifdef SQLITE_ENABLE_8_3_NAMES
+    sqlite3FileSuffix3(zFilename, pPager->zWal);
+    pPtr = (u8*)(pPager->zWal + sqlite3Strlen30(pPager->zWal)+1);
+#endif
+  }else{
+    pPager->zWal = 0;
+  }
+#endif
 
 #ifndef SQLITE_OMIT_WAL
   pPager->wal = NULL;
@@ -67068,9 +67090,6 @@ static int sqlite3WalClose(
       sqlite3EndBenignMalloc();
     }
     WALTRACE(("WAL%p: closed\n", pWal));
-    if (pWal->zWalName) {
-        sqlite3_free((void*)pWal->zWalName);
-    }
     sqlite3_free((void *)pWal->apWiData);
     sqlite3_free(pWal);
   }
@@ -69039,34 +69058,15 @@ static void libsqlGetWalPathname(char *buf, const char *orig, int orig_len) {
   memcpy(buf + orig_len, "-wal", 4);
 }
 
-static int libsqlMakeWalPathname(const char *main_db_path_name, char **out) {
-  int main_db_name_len = sqlite3Strlen30(main_db_path_name);
-
-  if( main_db_name_len > 0 ){
-      char *ptr = (char*)sqlite3MallocZero(libsqlWalPathnameLen(main_db_name_len) + 1);
-      if (!ptr) return SQLITE_NOMEM_BKPT;
-      libsqlGetWalPathname(ptr, main_db_path_name, main_db_name_len);
-      *out = ptr;
-  }
-
-  return SQLITE_OK;
-}
-
 SQLITE_PRIVATE int sqlite3LogExists(wal_manager_impl* self, sqlite3_vfs *vfs, const char *main_db_path_name, int *exists) {
-    char *zWal;
-    int rc = libsqlMakeWalPathname(main_db_path_name, &zWal);
-    if (rc != SQLITE_OK) return rc;
-    rc = sqlite3OsAccess(vfs, zWal, SQLITE_ACCESS_EXISTS, exists);
-    sqlite3_free(zWal);
+    const char *zWal = sqlite3_filename_wal(main_db_path_name);
+    int rc = sqlite3OsAccess(vfs, zWal, SQLITE_ACCESS_EXISTS, exists);
     return rc;
 }
 
 SQLITE_PRIVATE int sqlite3LogDestroy(wal_manager_impl* self, sqlite3_vfs *vfs, const char *main_db_path_name) {
-    char *zWal;
-    int rc = libsqlMakeWalPathname(main_db_path_name, &zWal);
-    if (rc != SQLITE_OK) return rc;
-    rc = sqlite3OsDelete(vfs, zWal, 0);
-    sqlite3_free(zWal);
+    const char *zWal = sqlite3_filename_wal(main_db_path_name);
+    int rc = sqlite3OsDelete(vfs, zWal, 0);
     return rc;
 }
 
@@ -69146,9 +69146,7 @@ static int sqlite3WalOpen(
   assert( UNIX_SHM_BASE==WALINDEX_LOCK_OFFSET );
 #endif
 
-  char *zWalName;
-  rc = libsqlMakeWalPathname(main_db_file_name, &zWalName);
-  if (rc) { return rc; }
+  const char *zWalName = sqlite3_filename_wal(main_db_file_name);
 
   /* Allocate an instance of struct Wal to return. */
   pRet = (Wal*)sqlite3MallocZero(sizeof(Wal) + pVfs->szOsFile);
@@ -69176,7 +69174,6 @@ static int sqlite3WalOpen(
   if( rc!=SQLITE_OK ){
     walIndexClose(pRet, 0);
     sqlite3OsClose(pRet->pWalFd);
-    sqlite3_free(zWalName);
     sqlite3_free(pRet);
   }else{
     int iDC = sqlite3OsDeviceCharacteristics(pDbFd);
