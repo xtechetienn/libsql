@@ -57454,7 +57454,6 @@ int sqlite3PagerTrace=1;  /* True to enable tracing */
 */
 #define MAX_SECTOR_SIZE 0x10000
 
-
 /*
 ** An instance of the following structure is allocated for each active
 ** savepoint and statement transaction in the system. All such structures
@@ -57746,6 +57745,32 @@ struct Pager {
 #endif
 };
 
+
+/* libSQL extension: pager codec */
+
+#ifdef LIBSQL_CUSTOM_PAGER_CODEC
+int libsql_pager_has_codec_impl(struct Pager *_p);
+void *libsql_pager_codec_impl(libsql_pghdr *hdr);
+#endif
+
+int libsql_pager_has_codec(struct Pager *_p) {
+#ifdef LIBSQL_CUSTOM_PAGER_CODEC
+  return libsql_pager_has_codec_impl(_p);
+#else
+  return 0;
+#endif
+}
+
+void *libsql_pager_codec(libsql_pghdr *hdr) {
+#ifdef LIBSQL_CUSTOM_PAGER_CODEC
+  return libsql_pager_codec_impl(hdr);
+#else
+  return hdr->pData;
+#endif
+}
+/* end of libSQL extension: pager codec */
+
+
 /*
 ** Indexes for use with Pager.aStat[]. The Pager.aStat[] array contains
 ** the values accessed by passing SQLITE_DBSTATUS_CACHE_HIT, CACHE_MISS
@@ -57859,6 +57884,7 @@ static const unsigned char aJournalMagic[] = {
 SQLITE_PRIVATE int sqlite3PagerDirectReadOk(Pager *pPager, Pgno pgno){
   if( pPager->fd->pMethods==0 ) return 0;
   if( sqlite3PCacheIsDirty(pPager->pPCache) ) return 0;
+  if( libsql_pager_has_codec(pPager) != 0 ) return 0;
 #ifndef SQLITE_OMIT_WAL
   if( pagerUseWal(pPager) ){
     u32 iRead = 0;
@@ -58092,7 +58118,7 @@ static void setGetterMethod(Pager *pPager){
   if( pPager->errCode ){
     pPager->xGet = getPageError;
 #if SQLITE_MAX_MMAP_SIZE>0
-  }else if( USEFETCH(pPager) ){
+  }else if( USEFETCH(pPager) && libsql_pager_has_codec(pPager) == 0 ){
     pPager->xGet = getPageMMap;
 #endif /* SQLITE_MAX_MMAP_SIZE>0 */
   }else{
@@ -65162,6 +65188,8 @@ SQLITE_PRIVATE int sqlite3PagerWalSystemErrno(Pager *pPager){
 
 /* #include "wal.h" */
 
+void *libsql_pager_codec(libsql_pghdr *p);
+
 typedef libsql_pghdr PgHdr;
 typedef sqlite3_wal Wal;
 
@@ -68402,6 +68430,7 @@ static int walWriteOneFrame(
   void *pData;                    /* Data actually written */
   u8 aFrame[WAL_FRAME_HDRSIZE];   /* Buffer to assemble frame-header in */
   pData = pPage->pData;
+  if( (pData = libsql_pager_codec(pPage))==0 ) return SQLITE_NOMEM_BKPT;
   walEncodeFrame(p->pWal, pPage->pgno, nTruncate, pData, aFrame);
   rc = walWriteToLog(p, aFrame, sizeof(aFrame), iOffset);
   if( rc ) return rc;
@@ -68586,7 +68615,7 @@ static int walFrames(
         if( pWal->iReCksum==0 || iWrite<pWal->iReCksum ){
           pWal->iReCksum = iWrite;
         }
-        pData = p->pData;
+        if( (pData = libsql_pager_codec(p))==0 ) return SQLITE_NOMEM;
         rc = sqlite3OsWrite(pWal->pWalFd, pData, szPage, iOff);
         if( rc ) return rc;
         p->flags &= ~PGHDR_WAL_APPEND;
@@ -120225,6 +120254,10 @@ SQLITE_PRIVATE int sqlite3DbIsNamed(sqlite3 *db, int iDb, const char *zName){
   );
 }
 
+#ifdef LIBSQL_EXTRA_URI_PARAMS
+int libsql_handle_extra_attach_params(sqlite3* db, const char* zName, const char* zPath, sqlite3_value* pKey, char** zErrDyn);
+#endif
+
 /*
 ** An SQL user-function registered to do the work of an ATTACH statement. The
 ** three arguments to the function come directly from an attach statement:
@@ -120379,6 +120412,11 @@ static void attachFunc(
   if( rc==SQLITE_OK && pNew->zDbSName==0 ){
     rc = SQLITE_NOMEM_BKPT;
   }
+#ifdef LIBSQL_EXTRA_URI_PARAMS
+  if (rc == SQLITE_OK) {
+    rc = libsql_handle_extra_attach_params(db, zName, zPath, argv, &zErrDyn);
+  }
+#endif
   sqlite3_free_filename( zPath );
 
   /* If the file was opened successfully, read the schema for the new database.
@@ -138870,6 +138908,10 @@ static int integrityCheckResultRow(Vdbe *v){
   return addr;
 }
 
+#ifdef LIBSQL_EXTRA_PRAGMAS
+int libsql_extra_pragma(sqlite3* db, const char* zDbName, void* pArg);
+#endif
+
 /*
 ** Process a pragma statement.
 **
@@ -138956,6 +138998,11 @@ SQLITE_PRIVATE void sqlite3Pragma(
   aFcntl[3] = 0;
   db->busyHandler.nBusy = 0;
   rc = sqlite3_file_control(db, zDb, SQLITE_FCNTL_PRAGMA, (void*)aFcntl);
+#ifdef LIBSQL_EXTRA_PRAGMAS
+  if(rc == SQLITE_NOTFOUND) {
+    rc = libsql_extra_pragma(db, zDb, (void*)aFcntl);
+  }
+#endif
   if( rc==SQLITE_OK ){
     sqlite3VdbeSetNumCols(v, 1);
     sqlite3VdbeSetColName(v, 0, COLNAME_NAME, aFcntl[0], SQLITE_TRANSIENT);
@@ -181882,6 +181929,10 @@ SQLITE_API int sqlite3_limit(sqlite3 *db, int limitId, int newLimit){
   return oldLimit;                     /* IMP: R-53341-35419 */
 }
 
+#ifdef LIBSQL_PRE_VFS_HOOK
+void libsql_pre_vfs_hook(const char *zVfs);
+#endif
+
 /*
 ** This function is used to parse both URIs and non-URI filenames passed by the
 ** user to API functions sqlite3_open() or sqlite3_open_v2(), and for database
@@ -182128,6 +182179,10 @@ SQLITE_PRIVATE int sqlite3ParseUri(
     flags &= ~SQLITE_OPEN_URI;
   }
 
+#ifdef LIBSQL_PRE_VFS_HOOK
+  libsql_pre_vfs_hook(zVfs);
+#endif
+
   *ppVfs = sqlite3_vfs_find(zVfs);
   if( *ppVfs==0 ){
     *pzErrMsg = sqlite3_mprintf("no such vfs: %s", zVfs);
@@ -182158,7 +182213,9 @@ static const char *uriParameter(const char *zFilename, const char *zParam){
   return 0;
 }
 
-
+#ifdef LIBSQL_EXTRA_URI_PARAMS
+int libsql_handle_extra_uri_params(sqlite3 *db, const char *zOpen);
+#endif
 
 /*
 ** This routine does the work of opening a database on behalf of
@@ -182516,6 +182573,11 @@ opendb_out:
     /* Opening a db handle. Fourth parameter is passed 0. */
     void *pArg = sqlite3GlobalConfig.pSqllogArg;
     sqlite3GlobalConfig.xSqllog(pArg, db, zFilename, 0);
+  }
+#endif
+#ifdef LIBSQL_EXTRA_URI_PARAMS
+  if (rc == SQLITE_OK) {
+    rc = libsql_handle_extra_uri_params(db, zOpen);
   }
 #endif
   sqlite3_free_filename(zOpen);
