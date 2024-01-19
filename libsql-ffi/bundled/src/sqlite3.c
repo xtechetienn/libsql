@@ -28,6 +28,8 @@
 **    configure
 **    configure.ac
 **    ext/wasm/GNUmakefile
+**    ext/wasm/api/EXPORTED_FUNCTIONS.sqlite3-api
+**    ext/wasm/api/sqlite3-api-oo1.js
 **    ext/wasm/fiddle.make
 **    ext/wasm/fiddle/fiddle-worker.js
 **    ext/wasm/fiddle/fiddle.js
