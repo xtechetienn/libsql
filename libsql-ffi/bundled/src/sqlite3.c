@@ -4180,6 +4180,10 @@ SQLITE_API int libsql_open_v3(
   libsql_wal_manager wal_manager   /* wal_manager instance, in charge of instanciating a wal */
 );
 
+typedef struct sqlite3_wal sqlite3_wal;
+SQLITE_API int sqlite3_wal_backfilled(sqlite3_wal *pWal);
+SQLITE_API unsigned int sqlite3_wal_frame_page_no(sqlite3_wal *pWal, unsigned int iFrame);
+
 SQLITE_API LIBSQL_API int libsql_try_initialize_wasm_func_table(sqlite3 *db);
 
 /*
@@ -14039,6 +14043,9 @@ typedef struct RefCountedWalManager {
 int make_ref_counted_wal_manager(libsql_wal_manager wal_manager, RefCountedWalManager **out);
 void destroy_wal_manager(RefCountedWalManager *p);
 RefCountedWalManager* clone_wal_manager(RefCountedWalManager *p);
+
+SQLITE_API int sqlite3_wal_backfilled(sqlite3_wal* pWal);
+SQLITE_API unsigned int sqlite3_wal_frame_page_no(sqlite3_wal *pWal, unsigned int iFrame);
 
 RefCountedWalManager *make_sqlite3_wal_manager_rc();
 
@@ -57088,6 +57095,9 @@ int make_ref_counted_wal_manager(libsql_wal_manager wal_manager, RefCountedWalMa
 void destroy_wal_manager(RefCountedWalManager *p);
 RefCountedWalManager* clone_wal_manager(RefCountedWalManager *p);
 
+SQLITE_API int sqlite3_wal_backfilled(sqlite3_wal* pWal);
+SQLITE_API unsigned int sqlite3_wal_frame_page_no(sqlite3_wal *pWal, unsigned int iFrame);
+
 RefCountedWalManager *make_sqlite3_wal_manager_rc();
 
 SQLITE_API extern const libsql_wal_manager sqlite3_wal_manager;
@@ -66032,7 +66042,14 @@ static u32 walFramePgno(Wal *pWal, u32 iFrame){
   if( iHash==0 ){
     return pWal->apWiData[0][WALINDEX_HDR_SIZE/sizeof(u32) + iFrame - 1];
   }
-  return pWal->apWiData[iHash][(iFrame-1-HASHTABLE_NPAGE_ONE)%HASHTABLE_NPAGE];
+
+  volatile u32 *page;
+  int rc = walIndexPage(pWal, iHash, &page);
+  assert( rc==SQLITE_OK || iHash>0 );
+  if (rc != SQLITE_OK) {
+      return 0;
+  }
+  return page[(iFrame-1-HASHTABLE_NPAGE_ONE)%HASHTABLE_NPAGE];
 }
 
 /*
@@ -69463,6 +69480,14 @@ RefCountedWalManager *make_sqlite3_wal_manager_rc() {
 }
 
 typedef struct wal_impl wal_impl;
+
+SQLITE_API int sqlite3_wal_backfilled(sqlite3_wal *pWal) {
+  return walCkptInfo(pWal)->nBackfill;
+}
+
+SQLITE_API u32 sqlite3_wal_frame_page_no(sqlite3_wal *pWal, u32 iFrame) {
+  return walFramePgno(pWal, iFrame);
+}
 
 #endif /* #ifndef SQLITE_OMIT_WAL */
 
