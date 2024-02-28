@@ -57782,7 +57782,7 @@ struct Pager {
 
 #ifdef LIBSQL_CUSTOM_PAGER_CODEC
 int libsql_pager_has_codec_impl(struct Pager *_p);
-void *libsql_pager_codec_impl(libsql_pghdr *hdr);
+int libsql_pager_codec_impl(libsql_pghdr *hdr, void **ret);
 #endif
 
 int libsql_pager_has_codec(struct Pager *_p) {
@@ -57793,11 +57793,15 @@ int libsql_pager_has_codec(struct Pager *_p) {
 #endif
 }
 
-void *libsql_pager_codec(libsql_pghdr *hdr) {
+int libsql_pager_codec(libsql_pghdr *hdr, void **ret) {
+  if (!ret) {
+	return SQLITE_MISUSE_BKPT;
+  }
 #ifdef LIBSQL_CUSTOM_PAGER_CODEC
-  return libsql_pager_codec_impl(hdr);
+  return libsql_pager_codec_impl(hdr, ret);
 #else
-  return hdr->pData;
+  *ret = hdr->pData;
+  return SQLITE_OK;
 #endif
 }
 /* end of libSQL extension: pager codec */
@@ -65220,7 +65224,7 @@ SQLITE_PRIVATE int sqlite3PagerWalSystemErrno(Pager *pPager){
 
 /* #include "wal.h" */
 
-void *libsql_pager_codec(libsql_pghdr *p);
+int libsql_pager_codec(libsql_pghdr *p, void **ret);
 
 typedef libsql_pghdr PgHdr;
 typedef sqlite3_wal Wal;
@@ -68563,7 +68567,9 @@ static int walWriteOneFrame(
   void *pData;                    /* Data actually written */
   u8 aFrame[WAL_FRAME_HDRSIZE];   /* Buffer to assemble frame-header in */
   pData = pPage->pData;
-  if( (pData = libsql_pager_codec(pPage))==0 ) return SQLITE_NOMEM_BKPT;
+  rc = libsql_pager_codec(pPage, &pData);
+  if( rc ) return rc;
+
   walEncodeFrame(p->pWal, pPage->pgno, nTruncate, pData, aFrame);
   rc = walWriteToLog(p, aFrame, sizeof(aFrame), iOffset);
   if( rc ) return rc;
@@ -68750,7 +68756,9 @@ static int walFrames(
         if( pWal->iReCksum==0 || iWrite<pWal->iReCksum ){
           pWal->iReCksum = iWrite;
         }
-        if( (pData = libsql_pager_codec(p))==0 ) return SQLITE_NOMEM;
+
+        rc = libsql_pager_codec(p, &pData);
+        if( rc ) return rc;
         rc = sqlite3OsWrite(pWal->pWalFd, pData, szPage, iOff);
         if( rc ) return rc;
         p->flags &= ~PGHDR_WAL_APPEND;
@@ -131315,9 +131323,9 @@ int libsql_try_initialize_wasm_func_table(sqlite3 *db) {
           sqlite3_finalize(stmt);
           return rc;
         }
-        const char *pName = sqlite3_column_text(stmt, 0);
+        const unsigned char *pName = sqlite3_column_text(stmt, 0);
         const void *pBody = body_type == SQLITE_TEXT ? sqlite3_column_text(stmt, 1) : sqlite3_column_blob(stmt, 1);
-        try_instantiate_wasm_function(db, pName, name_size, pBody, body_size, -1, NULL);
+        try_instantiate_wasm_function(db, (const char *)pName, name_size, pBody, body_size, -1, NULL);
       }
     }
     sqlite3_finalize(stmt);
@@ -136111,7 +136119,7 @@ static int xferOptimization(
       }
       autoIncStep(pParse, regNextRowid, regRowid);
     }else if( pDest->pIndex==0 && !(db->mDbFlags & DBFLAG_VacuumInto) ){
-      addr1 = sqlite3VdbeAddOp2(v, OP_NewRowid, iDest, regRowid);
+      addr1 = sqlite3VdbeAddOp3(v, OP_NewRowid, iDest, regRowid, regNextRowid);
     }else{
       addr1 = sqlite3VdbeAddOp2(v, OP_Rowid, iSrc, regRowid);
       assert( (pDest->tabFlags & TF_Autoincrement)==0 );
