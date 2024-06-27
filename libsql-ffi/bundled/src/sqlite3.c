@@ -29,6 +29,7 @@
 **    configure.ac
 **    ext/wasm/GNUmakefile
 **    ext/wasm/api/EXPORTED_FUNCTIONS.sqlite3-api
+**    ext/wasm/api/sqlite3-api-glue.js
 **    ext/wasm/api/sqlite3-api-oo1.js
 **    ext/wasm/fiddle.make
 **    ext/wasm/fiddle/fiddle-worker.js
@@ -182437,8 +182438,8 @@ static int openDatabase(
   ){
     db->mutex = sqlite3MutexAlloc(SQLITE_MUTEX_RECURSIVE);
     if( db->mutex==0 ){
-      wal_manager->ref.xDestroy(wal_manager->ref.pData);
-      sqlite3_free(db->wal_manager);
+      db->wal_manager->ref.xDestroy(db->wal_manager->ref.pData);
+      destroy_wal_manager(db->wal_manager);
       sqlite3_free(db);
       db = 0;
       goto opendb_out;
