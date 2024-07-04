@@ -21663,7 +21663,7 @@ SQLITE_PRIVATE void sqlite3Reindex(Parse*, Token*, Token*);
 SQLITE_PRIVATE void sqlite3AlterFunctions(void);
 SQLITE_PRIVATE void sqlite3AlterRenameTable(Parse*, SrcList*, Token*);
 SQLITE_PRIVATE void sqlite3AlterRenameColumn(Parse*, SrcList*, Token*, Token*);
-void libsqlAlterAlterColumn(Parse*, SrcList*, Token*, Token*);
+void libsqlAlterAlterColumn(Parse*, SrcList*, Token*, Token*, int);
 SQLITE_PRIVATE int sqlite3GetToken(const unsigned char *, int *);
 SQLITE_PRIVATE void sqlite3NestedParse(Parse*, const char*, ...);
 SQLITE_PRIVATE void sqlite3ExpirePreparedStatements(sqlite3*, int);
@@ -116496,7 +116496,8 @@ void libsqlAlterAlterColumn(
   Parse *pParse,                  /* Parsing context */
   SrcList *pSrc,                  /* Table being altered.  pSrc->nSrc==1 */
   Token *pOld,                    /* Name of column being changed */
-  Token *pNew                     /* New column declaration */
+  Token *pNew,                    /* New column declaration */
+  int nNewSqlLength               /* New column declaration SQL string length (pNew.z is the start of the declaration) */
 ){
   sqlite3 *db = pParse->db;       /* Database connection */
   Table *pTab;                    /* Table being updated */
@@ -116554,9 +116555,7 @@ void libsqlAlterAlterColumn(
   }
   // NOTICE: this is the main difference in ALTER COLUMN compared to RENAME COLUMN,
   // we just take the whole new column declaration as it is.
-  // FIXME: the semicolon can also appear in the middle of the declaration when it's quoted,
-  // so we should check from the end.
-  pNew->n = sqlite3Strlen30(pNew->z);
+  pNew->n = nNewSqlLength;
   while (pNew->n > 0 && pNew->z[pNew->n - 1] == ';') pNew->n--;
   zNew = sqlite3DbStrNDup(db, pNew->z, pNew->n);
   if( !zNew ) goto exit_update_column;
@@ -116565,7 +116564,7 @@ void libsqlAlterAlterColumn(
   sqlite3NestedParse(pParse,
       "UPDATE \"%w\"." LEGACY_SCHEMA_TABLE " SET "
       "sql = libsql_alter_column(sql, %Q, %Q, %d, %Q, %d, %d, %d) "
-      "WHERE tbl_name = %Q",
+      "WHERE name = %Q AND type = 'table'",
       zDb,
       zDb, pTab->zName, iCol, zNew, bQuote, iSchema==1, pTab->aCol[iCol].colFlags,
       pTab->zName
@@ -117577,9 +117576,11 @@ renameColumnFunc_done:
 */
 static void alterColumnFunc(
   sqlite3_context *context,
-  int NotUsed,
+  int argc,
   sqlite3_value **argv
 ){
+  UNUSED_PARAMETER(argc);
+
   sqlite3 *db = sqlite3_context_db_handle(context);
   RenameCtx sCtx;
   const char *zSql = (const char*)sqlite3_value_text(argv[0]);
@@ -117602,7 +117603,6 @@ static void alterColumnFunc(
   sqlite3_xauth xAuth = db->xAuth;
 #endif
 
-  UNUSED_PARAMETER(NotUsed);
   if( zSql==0 ) return;
   if( zTable==0 ) return;
   if( zNew==0 ) return;
@@ -117655,9 +117655,10 @@ static void alterColumnFunc(
       }
     } else {
       rc = SQLITE_ERROR;
-      sParse.zErrMsg = sqlite3MPrintf(sParse.db, "Only ordinary tables can be altered, not ", IsView(sParse.pNewTable) ? "views" : "virtual tables");
-      goto alterColumnFunc_done;    }
-  } else if (sParse.pNewIndex) {
+      sParse.zErrMsg = sqlite3MPrintf(sParse.db, "Only ordinary tables can be altered, not %s", IsView(sParse.pNewTable) ? "views" : "virtual tables");
+      goto alterColumnFunc_done;
+    }
+  } else if( sParse.pNewIndex ){
     rc = SQLITE_ERROR;
     sParse.zErrMsg = sqlite3MPrintf(sParse.db, "Only ordinary tables can be altered, not indexes");
     goto alterColumnFunc_done;
@@ -176759,7 +176760,8 @@ static YYACTIONTYPE yy_reduce(
         break;
       case 301: /* cmd ::= ALTER TABLE fullname ALTER COLUMNKW columnname TO columnname carglist */
 {
-  libsqlAlterAlterColumn(pParse, yymsp[-6].minor.yy203, &yymsp[-3].minor.yy0, &yymsp[-1].minor.yy0);
+  int definitionLength = (int)(pParse->sLastToken.z-yymsp[-1].minor.yy0.z) + pParse->sLastToken.n;
+  libsqlAlterAlterColumn(pParse, yymsp[-6].minor.yy203, &yymsp[-3].minor.yy0, &yymsp[-1].minor.yy0, definitionLength);
 }
         break;
       case 302: /* cmd ::= create_vtab */
