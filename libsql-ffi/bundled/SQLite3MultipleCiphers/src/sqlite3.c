@@ -24,6 +24,7 @@
 **    .fossil-settings/ignore-glob
 **    LICENSE.md
 **    Makefile.in
+**    Makefile.msc
 **    README.md
 **    configure
 **    configure.ac
@@ -69,11 +70,14 @@
 **    src/wal.c
 **    src/wal.h
 **    src/wherecode.c
+**    test/all.test
 **    test/permutations.test
 **    test/rowvaluevtab.test
 **    tool/mkkeywordhash.c
+**    tool/mksqlite3c-noext.tcl
 **    tool/mksqlite3c.tcl
 **    tool/mksqlite3h.tcl
+**    tool/mksqlite3internalh.tcl
 **    manifest.uuid
 */
 #define SQLITE_CORE 1
@@ -21437,6 +21441,9 @@ SQLITE_PRIVATE void sqlite3QuoteValue(StrAccum*,sqlite3_value*);
 SQLITE_PRIVATE void sqlite3RegisterBuiltinFunctions(void);
 SQLITE_PRIVATE void sqlite3RegisterDateTimeFunctions(void);
 SQLITE_PRIVATE void sqlite3RegisterJsonFunctions(void);
+#ifndef SQLITE_OMIT_VECTOR
+SQLITE_PRIVATE void sqlite3RegisterVectorFunctions(void);
+#endif
 SQLITE_PRIVATE void sqlite3RegisterPerConnectionBuiltinFunctions(sqlite3*);
 #if !defined(SQLITE_OMIT_VIRTUALTABLE) && !defined(SQLITE_OMIT_JSON)
 SQLITE_PRIVATE   int sqlite3JsonTableFunctions(sqlite3*);
@@ -131564,6 +131571,9 @@ SQLITE_PRIVATE void sqlite3RegisterBuiltinFunctions(void){
   sqlite3WindowFunctions();
   sqlite3RegisterDateTimeFunctions();
   sqlite3RegisterJsonFunctions();
+#ifndef SQLITE_OMIT_VECTOR
+  sqlite3RegisterVectorFunctions();
+#endif
   sqlite3InsertBuiltinFuncs(aBuiltinFunc, ArraySize(aBuiltinFunc));
 
 #if 0  /* Enable to print out how the built-in functions are hashed */
@@ -208122,6 +208132,1164 @@ SQLITE_PRIVATE int sqlite3JsonTableFunctions(sqlite3 *db){
 #endif /* !defined(SQLITE_OMIT_VIRTUALTABLE) && !defined(SQLITE_OMIT_JSON) */
 
 /************** End of json.c ************************************************/
+/************** Begin file vector.c ******************************************/
+/*
+** 2024-07-04
+**
+** Copyright 2024 the libSQL authors
+**
+** Permission is hereby granted, free of charge, to any person obtaining a copy of
+** this software and associated documentation files (the "Software"), to deal in
+** the Software without restriction, including without limitation the rights to
+** use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+** the Software, and to permit persons to whom the Software is furnished to do so,
+** subject to the following conditions:
+**
+** The above copyright notice and this permission notice shall be included in all
+** copies or substantial portions of the Software.
+**
+** THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+** IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+** FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+** COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+** IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+** CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+**
+******************************************************************************
+**
+** libSQL basic vector functions
+*/
+#ifndef SQLITE_OMIT_VECTOR
+
+/* #include "sqliteInt.h" */
+/************** Include vectorInt.h in the middle of vector.c ****************/
+/************** Begin file vectorInt.h ***************************************/
+#ifndef _VECTOR_H
+#define _VECTOR_H
+
+/* #include "sqlite3.h" */
+
+#if 0
+extern "C" {
+#endif
+
+/* Objects */
+typedef struct Vector Vector;
+typedef u16 VectorType;
+typedef u32 VectorDims;
+
+/*
+ * Maximum dimensions for single vector in the DB. Any attempt to work with vector of bigger size will results to an error
+ * (this is possible as user can write blob manually and later try to deserialize it)
+*/
+#define MAX_VECTOR_SZ 65536
+
+/*
+ * Enumerate of supported vector types (0 omitted intentionally as we can use zero as "undefined" value)
+*/
+#define VECTOR_TYPE_FLOAT32 1
+#define VECTOR_TYPE_FLOAT64 2
+
+#define VECTOR_FLAGS_STATIC 1
+
+/*
+ * Object which represents a vector
+ * data points to the memory which must be interpreted according to the vector type
+*/
+struct Vector {
+  VectorType type;  /* Type of vector */
+  u16 flags;        /* Vector flags */
+  VectorDims dims;  /* Number of dimensions */
+  void *data;       /* Vector data */
+};
+
+size_t vectorDataSize(VectorType, VectorDims);
+Vector *vectorAlloc(VectorType, VectorDims);
+void vectorFree(Vector *v);
+int vectorParse(sqlite3_value *, Vector *, char **);
+void vectorInit(Vector *, VectorType, VectorDims, void *);
+
+/*
+ * Dumps vector on the console (used only for debugging)
+*/
+void vectorDump   (const Vector *v);
+void vectorF32Dump(const Vector *v);
+void vectorF64Dump(const Vector *v);
+
+/*
+ * Converts vector to the text representation and write the result to the sqlite3_context
+*/
+void vectorMarshalToText   (sqlite3_context *, const Vector *);
+void vectorF32MarshalToText(sqlite3_context *, const Vector *);
+void vectorF64MarshalToText(sqlite3_context *, const Vector *);
+
+/*
+ * Serializes vector to the blob in little-endian format according to the IEEE-754 standard
+*/
+size_t vectorSerializeToBlob   (const Vector *, unsigned char *, size_t);
+size_t vectorF32SerializeToBlob(const Vector *, unsigned char *, size_t);
+size_t vectorF64SerializeToBlob(const Vector *, unsigned char *, size_t);
+
+/*
+ * Deserializes vector from the blob in little-endian format according to the IEEE-754 standard
+*/
+size_t vectorDeserializeFromBlob   (Vector *, const unsigned char *, size_t);
+size_t vectorF32DeserializeFromBlob(Vector *, const unsigned char *, size_t);
+size_t vectorF64DeserializeFromBlob(Vector *, const unsigned char *, size_t);
+
+/*
+ * Calculates cosine distance between two vectors (vector must have same type and same dimensions)
+*/
+float vectorDistanceCos    (const Vector *, const Vector *);
+float vectorF32DistanceCos (const Vector *, const Vector *);
+double vectorF64DistanceCos(const Vector *, const Vector *);
+
+/*
+ * Serializes vector to the sqlite_blob in little-endian format according to the IEEE-754 standard
+ * LibSQL can append one trailing byte in the end of final blob. This byte will be later used to determine type of the blob
+ * By default, blob with even length will be treated as a f32 blob
+*/
+void vectorSerialize   (sqlite3_context *, const Vector *);
+void vectorF32Serialize(sqlite3_context *, const Vector *);
+void vectorF64Serialize(sqlite3_context *, const Vector *);
+
+/*
+ * Parses Vector content from the blob; vector type and dimensions must be filled already
+*/
+int vectorParseSqliteBlob   (sqlite3_value *, Vector *, char **);
+int vectorF32ParseSqliteBlob(sqlite3_value *, Vector *, char **);
+int vectorF64ParseSqliteBlob(sqlite3_value *, Vector *, char **);
+
+void vectorF32InitFromBlob(Vector *, const unsigned char *, size_t);
+void vectorF64InitFromBlob(Vector *, const unsigned char *, size_t);
+
+#if 0
+}  /* end of the 'extern "C"' block */
+#endif
+
+#endif /* _VECTOR_H */
+
+/************** End of vectorInt.h *******************************************/
+/************** Continuing where we left off in vector.c *********************/
+
+#define MAX_FLOAT_CHAR_SZ  1024
+
+/**************************************************************************
+** Utility routines for dealing with Vector objects
+**************************************************************************/
+
+size_t vectorDataSize(VectorType type, VectorDims dims){
+  switch( type ){
+    case VECTOR_TYPE_FLOAT32:
+      return dims * sizeof(float);
+    case VECTOR_TYPE_FLOAT64:
+      return dims * sizeof(double);
+    default:
+      assert(0);
+  }
+  return 0;
+}
+
+void vectorInit(Vector *pVector, VectorType type, VectorDims dims, void *data){
+  pVector->type = type;
+  pVector->dims = dims;
+  pVector->data = data;
+  pVector->flags = 0;
+}
+
+/*
+ * Allocate a Vector object and its data buffer
+*/
+Vector *vectorAlloc(VectorType type, VectorDims dims){
+  void *pVector = sqlite3_malloc(sizeof(Vector) + vectorDataSize(type, dims));
+  if( pVector==NULL ){
+    return NULL;
+  }
+  vectorInit(pVector, type, dims, ((char*) pVector) + sizeof(Vector));
+  return pVector;
+}
+
+/*
+ * Allocate a Vector object and its data buffer from the SQLite context.
+*/
+static Vector* vectorContextAlloc(sqlite3_context *context, int type, int dims){
+  void *pVector = sqlite3_malloc64(sizeof(Vector) + vectorDataSize(type, dims));
+  if( pVector==NULL ){
+    sqlite3_result_error_nomem(context);
+    return NULL;
+  }
+  vectorInit(pVector, type, dims, ((char*) pVector) + sizeof(Vector));
+  return pVector;
+}
+
+/*
+ * Free a Vector object and its data buffer allocated, unless the vector is static.
+*/
+void vectorFree(Vector *pVector){
+  if( pVector == NULL ){
+    return;
+  }
+  if( pVector->flags & VECTOR_FLAGS_STATIC ){
+    return;
+  }
+  sqlite3_free(pVector);
+}
+
+float vectorDistanceCos(const Vector *pVector1, const Vector *pVector2){
+  assert( pVector1->type == pVector2->type );
+  switch (pVector1->type) {
+    case VECTOR_TYPE_FLOAT32:
+      return vectorF32DistanceCos(pVector1, pVector2);
+    case VECTOR_TYPE_FLOAT64:
+      return vectorF64DistanceCos(pVector1, pVector2);
+    default:
+      assert(0);
+  }
+  return 0;
+}
+
+/*
+ * Parses vector from text representation (e.g. '[1,2,3]'); vector type must be set
+*/
+static int vectorParseSqliteText(
+  sqlite3_value *arg,
+  Vector *pVector,
+  char **pzErrMsg
+){
+  const unsigned char *pzText;
+  double elem;
+  float *elemsFloat;
+  double *elemsDouble;
+  int iElem = 0;
+  // one more extra character in order to safely print data from elBuf with printf-like method; will be set to zero later
+  char valueBuf[MAX_FLOAT_CHAR_SZ + 1];
+  int iBuf = 0;
+
+  assert( pVector->type == VECTOR_TYPE_FLOAT32 || pVector->type == VECTOR_TYPE_FLOAT64 );
+
+  if( pVector->type == VECTOR_TYPE_FLOAT32 ){
+    elemsFloat = pVector->data;
+  } else if( pVector->type == VECTOR_TYPE_FLOAT64 ){
+    elemsDouble = pVector->data;
+  }
+
+  if( sqlite3_value_type(arg) != SQLITE_TEXT ){
+    *pzErrMsg = sqlite3_mprintf("invalid vector: not a text type");
+    goto error;
+  }
+
+  pzText = sqlite3_value_text(arg);
+  if ( pzText == NULL ) return 0;
+
+  while( sqlite3Isspace(*pzText) )
+    pzText++;
+
+  if( *pzText != '[' ){
+    *pzErrMsg = sqlite3_mprintf("invalid vector: doesn't start with '['");
+    goto error;
+  }
+  pzText++;
+
+  // clear elBuf when we are ready to parse floats
+  memset(valueBuf, 0, sizeof(valueBuf));
+
+  for(; *pzText != '\0'; pzText++){
+    char this = *pzText;
+    if( sqlite3Isspace(this) ){
+      continue;
+    }
+    if( this != ',' && this != ']' ){
+      if( iBuf > MAX_FLOAT_CHAR_SZ ){
+        *pzErrMsg = sqlite3_mprintf("float too big while parsing vector: '%s'", valueBuf);
+        goto error;
+      }
+      valueBuf[iBuf++] = this;
+      continue;
+    }
+    // empty vector case: '[]'
+    if( this == ']' && iElem == 0 && iBuf == 0 ){
+      break;
+    }
+    if( sqlite3AtoF(valueBuf, &elem, iBuf, SQLITE_UTF8) <= 0 ){
+      *pzErrMsg = sqlite3_mprintf("invalid number: '%s'", valueBuf);
+      goto error;
+    }
+    if( iElem >= MAX_VECTOR_SZ ){
+      *pzErrMsg = sqlite3_mprintf("vector is larger than the maximum: (%d)", MAX_VECTOR_SZ);
+      goto error;
+    }
+    // clear only first bufidx positions - all other are zero
+    memset(valueBuf, 0, iBuf);
+    iBuf = 0;
+    if( pVector->type == VECTOR_TYPE_FLOAT32 ){
+      elemsFloat[iElem++] = elem;
+    } else if( pVector->type == VECTOR_TYPE_FLOAT64 ){
+      elemsDouble[iElem++] = elem;
+    }
+    if( this == ']' ){
+      break;
+    }
+  }
+  while( sqlite3Isspace(*pzText) )
+    pzText++;
+
+  if( *pzText != ']' ){
+    *pzErrMsg = sqlite3_mprintf("malformed vector, doesn't end with ']'");
+    goto error;
+  }
+  pzText++;
+
+  while( sqlite3Isspace(*pzText) )
+    pzText++;
+
+  if( *pzText != '\0' ){
+    *pzErrMsg = sqlite3_mprintf("malformed vector, extra data after closing ']'");
+    goto error;
+  }
+  pVector->dims = iElem;
+  return 0;
+error:
+  return -1;
+}
+
+int vectorParseSqliteBlob(
+  sqlite3_value *arg,
+  Vector *pVector,
+  char **pzErrMsg
+){
+  switch (pVector->type) {
+    case VECTOR_TYPE_FLOAT32:
+      return vectorF32ParseSqliteBlob(arg, pVector, pzErrMsg);
+    case VECTOR_TYPE_FLOAT64:
+      return vectorF64ParseSqliteBlob(arg, pVector, pzErrMsg);
+    default:
+      assert(0);
+  }
+  return -1;
+}
+
+int detectBlobVectorParameters(sqlite3_value *arg, int *pType, int *pDims, char **pzErrMsg) {
+  const u8 *pBlob;
+  int nBlobSize;
+
+  assert( sqlite3_value_type(arg) == SQLITE_BLOB );
+
+  pBlob = sqlite3_value_blob(arg);
+  nBlobSize = sqlite3_value_bytes(arg);
+  if( nBlobSize % 2 != 0 ){
+    // we have trailing byte with explicit type definition
+    *pType = pBlob[nBlobSize - 1];
+  } else {
+    // else, fallback to FLOAT32
+    *pType = VECTOR_TYPE_FLOAT32;
+  }
+  if( *pType == VECTOR_TYPE_FLOAT32 ){
+    *pDims = nBlobSize / sizeof(float);
+  } else if( *pType == VECTOR_TYPE_FLOAT64 ){
+    *pDims = nBlobSize / sizeof(double);
+  } else{
+    *pzErrMsg = sqlite3_mprintf("invalid binary vector: unexpected type: %d", *pType);
+    return -1;
+  }
+  if( *pDims > MAX_VECTOR_SZ ){
+    *pzErrMsg = sqlite3_mprintf("invalid binary vector: max size exceeded: %d > %d", *pDims, MAX_VECTOR_SZ);
+    return -1;
+  }
+  return 0;
+}
+
+int detectTextVectorParameters(sqlite3_value *arg, int typeHint, int *pType, int *pDims, char **pzErrMsg) {
+  const u8 *text;
+  int textBytes;
+  int iText;
+  int textHasDigit;
+
+  assert( sqlite3_value_type(arg) == SQLITE_TEXT );
+  text = sqlite3_value_text(arg);
+  textBytes = sqlite3_value_bytes(arg);
+  if( typeHint == 0 ){
+    *pType = VECTOR_TYPE_FLOAT32;
+  }else if( typeHint == VECTOR_TYPE_FLOAT32 ){
+    *pType = VECTOR_TYPE_FLOAT32;
+  }else if( typeHint == VECTOR_TYPE_FLOAT64 ){
+    *pType = VECTOR_TYPE_FLOAT64;
+  }else{
+    *pzErrMsg = sqlite3_mprintf("unexpected vector type");
+    return -1;
+  }
+  *pDims = 0;
+  for(iText = 0; iText < textBytes; iText++){
+    if( text[iText] == ',' ){
+      *pDims += 1;
+    }
+    if( sqlite3Isdigit(text[iText]) ){
+      textHasDigit = 1;
+    }
+  }
+  if( textHasDigit ){
+    *pDims += 1;
+  }
+  return 0;
+}
+
+int detectVectorParameters(sqlite3_value *arg, int typeHint, int *pType, int *pDims, char **pzErrMsg) {
+  switch( sqlite3_value_type(arg) ){
+    case SQLITE_NULL:
+      *pzErrMsg = sqlite3_mprintf("invalid vector: NULL");
+      return -1;
+    case SQLITE_BLOB:
+      return detectBlobVectorParameters(arg, pType, pDims, pzErrMsg);
+    case SQLITE_TEXT:
+      return detectTextVectorParameters(arg, typeHint, pType, pDims, pzErrMsg);
+    default:
+      *pzErrMsg = sqlite3_mprintf("invalid vector: not a text or blob type");
+      return -1;
+  }
+}
+
+int vectorParse(
+  sqlite3_value *arg,
+  Vector *pVector,
+  char **pzErrMsg
+){
+  switch( sqlite3_value_type(arg) ){
+    case SQLITE_NULL:
+      *pzErrMsg = sqlite3_mprintf("invalid vector: NULL");
+      return -1;
+    case SQLITE_BLOB:
+      return vectorParseSqliteBlob(arg, pVector, pzErrMsg);
+    case SQLITE_TEXT:
+      return vectorParseSqliteText(arg, pVector, pzErrMsg);
+    default:
+      *pzErrMsg = sqlite3_mprintf("invalid vector: not a text or blob type");
+      return -1;
+  }
+}
+
+void vectorDump(const Vector *pVector){
+  switch (pVector->type) {
+    case VECTOR_TYPE_FLOAT32:
+      vectorF32Dump(pVector);
+      break;
+    case VECTOR_TYPE_FLOAT64:
+      vectorF64Dump(pVector);
+      break;
+    default:
+      assert(0);
+  }
+}
+
+void vectorMarshalToText(
+  sqlite3_context *context,
+  const Vector *pVector
+){
+  switch (pVector->type) {
+    case VECTOR_TYPE_FLOAT32:
+      vectorF32MarshalToText(context, pVector);
+      break;
+    case VECTOR_TYPE_FLOAT64:
+      vectorF64MarshalToText(context, pVector);
+      break;
+    default:
+      assert(0);
+  }
+}
+
+void vectorSerialize(
+  sqlite3_context *context,
+  const Vector *pVector
+){
+  switch (pVector->type) {
+    case VECTOR_TYPE_FLOAT32:
+      vectorF32Serialize(context, pVector);
+      break;
+    case VECTOR_TYPE_FLOAT64:
+      vectorF64Serialize(context, pVector);
+      break;
+    default:
+      assert(0);
+  }
+}
+
+size_t vectorSerializeToBlob(const Vector *pVector, unsigned char *pBlob, size_t nBlobSize){
+  switch (pVector->type) {
+    case VECTOR_TYPE_FLOAT32:
+      return vectorF32SerializeToBlob(pVector, pBlob, nBlobSize);
+    case VECTOR_TYPE_FLOAT64:
+      return vectorF64SerializeToBlob(pVector, pBlob, nBlobSize);
+    default:
+      assert(0);
+  }
+  return 0;
+}
+
+size_t vectorDeserializeFromBlob(Vector *pVector, const unsigned char *pBlob, size_t nBlobSize){
+  switch (pVector->type) {
+    case VECTOR_TYPE_FLOAT32:
+      return vectorF32DeserializeFromBlob(pVector, pBlob, nBlobSize);
+    case VECTOR_TYPE_FLOAT64:
+      return vectorF64DeserializeFromBlob(pVector, pBlob, nBlobSize);
+    default:
+      assert(0);
+  }
+  return 0;
+}
+
+/**************************************************************************
+** SQL function implementations
+****************************************************************************/
+
+/*
+** Generic vector(...) function with type hint
+*/
+static void vectorFuncHintedType(
+  sqlite3_context *context,
+  int argc,
+  sqlite3_value **argv,
+  int typeHint
+){
+  char *pzErrMsg = NULL;
+  Vector *pVector;
+  int type, dims;
+  if( argc < 1 ){
+    return;
+  }
+  if( detectVectorParameters(argv[0], typeHint, &type, &dims, &pzErrMsg) != 0 ){
+    sqlite3_result_error(context, pzErrMsg, -1);
+    sqlite3_free(pzErrMsg);
+    return;
+  }
+  pVector = vectorContextAlloc(context, type, dims);
+  if( pVector==NULL ){
+    return;
+  }
+  if( vectorParse(argv[0], pVector, &pzErrMsg) != 0 ){
+    sqlite3_result_error(context, pzErrMsg, -1);
+    sqlite3_free(pzErrMsg);
+    goto out_free_vec;
+  }
+  vectorSerialize(context, pVector);
+out_free_vec:
+  vectorFree(pVector);
+}
+
+static void vector32Func(
+  sqlite3_context *context,
+  int argc,
+  sqlite3_value **argv
+){
+  vectorFuncHintedType(context, argc, argv, VECTOR_TYPE_FLOAT32);
+}
+static void vector64Func(
+  sqlite3_context *context,
+  int argc,
+  sqlite3_value **argv
+){
+  vectorFuncHintedType(context, argc, argv, VECTOR_TYPE_FLOAT64);
+}
+
+/*
+** Implementation of vector_extract(X) function.
+*/
+static void vectorExtractFunc(
+  sqlite3_context *context,
+  int argc,
+  sqlite3_value **argv
+){
+  char *pzErrMsg = NULL;
+  Vector *pVector;
+  unsigned i;
+  int type, dims;
+
+  if( argc < 1 ){
+    return;
+  }
+  if( detectVectorParameters(argv[0], 0, &type, &dims, &pzErrMsg) != 0 ){
+    sqlite3_result_error(context, pzErrMsg, -1);
+    sqlite3_free(pzErrMsg);
+    return;
+  }
+  pVector = vectorContextAlloc(context, type, dims);
+  if( pVector==NULL ){
+    return;
+  }
+  if( vectorParse(argv[0], pVector, &pzErrMsg)<0 ){
+    sqlite3_result_error(context, pzErrMsg, -1);
+    sqlite3_free(pzErrMsg);
+    goto out_free;
+  }
+  vectorMarshalToText(context, pVector);
+out_free:
+  vectorFree(pVector);
+}
+
+/*
+** Implementation of vector_distance_cos(X, Y) function.
+*/
+static void vectorDistanceCosFunc(
+  sqlite3_context *context,
+  int argc,
+  sqlite3_value **argv
+){
+  char *pzErrMsg = NULL;
+  Vector *pVector1 = NULL, *pVector2 = NULL;
+  int type1, type2;
+  int dims1, dims2;
+  if( argc < 2 ) {
+    return;
+  }
+  if( detectVectorParameters(argv[0], 0, &type1, &dims1, &pzErrMsg) != 0 ){
+    sqlite3_result_error(context, pzErrMsg, -1);
+    sqlite3_free(pzErrMsg);
+    goto out_free;
+  }
+  if( detectVectorParameters(argv[1], 0, &type2, &dims2, &pzErrMsg) != 0 ){
+    sqlite3_result_error(context, pzErrMsg, -1);
+    sqlite3_free(pzErrMsg);
+    goto out_free;
+  }
+  if( type1 != type2 ){
+    sqlite3_result_error(context, "vectors must have the same type", -1);
+    goto out_free;
+  }
+  if( dims1 != dims2 ){
+    sqlite3_result_error(context, "vectors must have the same length", -1);
+    goto out_free;
+  }
+  pVector1 = vectorContextAlloc(context, type1, dims1);
+  if( pVector1==NULL ){
+    goto out_free;
+  }
+  pVector2 = vectorContextAlloc(context, type2, dims2);
+  if( pVector2==NULL ){
+    goto out_free;
+  }
+  if( vectorParse(argv[0], pVector1, &pzErrMsg)<0 ){
+    sqlite3_result_error(context, pzErrMsg, -1);
+    sqlite3_free(pzErrMsg);
+    goto out_free;
+  }
+  if( vectorParse(argv[1], pVector2, &pzErrMsg)<0 ){
+    sqlite3_result_error(context, pzErrMsg, -1);
+    sqlite3_free(pzErrMsg);
+    goto out_free;
+  }
+  sqlite3_result_double(context, vectorDistanceCos(pVector1, pVector2));
+out_free:
+  if( pVector2 ){
+    vectorFree(pVector2);
+  }
+  if( pVector1 ){
+    vectorFree(pVector1);
+  }
+}
+
+/*
+** Register vector functions.
+*/
+SQLITE_PRIVATE void sqlite3RegisterVectorFunctions(void){
+ static FuncDef aVectorFuncs[] = {
+    FUNCTION(vector,              1, 0, 0, vector32Func),
+    FUNCTION(vector32,            1, 0, 0, vector32Func),
+    FUNCTION(vector64,            1, 0, 0, vector64Func),
+    FUNCTION(vector_extract,      1, 0, 0, vectorExtractFunc),
+    FUNCTION(vector_distance_cos, 2, 0, 0, vectorDistanceCosFunc),
+  };
+  sqlite3InsertBuiltinFuncs(aVectorFuncs, ArraySize(aVectorFuncs));
+}
+
+#endif /* !defined(SQLITE_OMIT_VECTOR) */
+
+/************** End of vector.c **********************************************/
+/************** Begin file vectorfloat32.c ***********************************/
+/*
+** 2024-07-04
+**
+** Copyright 2024 the libSQL authors
+**
+** Permission is hereby granted, free of charge, to any person obtaining a copy of
+** this software and associated documentation files (the "Software"), to deal in
+** the Software without restriction, including without limitation the rights to
+** use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+** the Software, and to permit persons to whom the Software is furnished to do so,
+** subject to the following conditions:
+**
+** The above copyright notice and this permission notice shall be included in all
+** copies or substantial portions of the Software.
+**
+** THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+** IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+** FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+** COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+** IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+** CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+**
+******************************************************************************
+**
+** 32-bit floating point vector format utilities.
+*/
+#ifndef SQLITE_OMIT_VECTOR
+/* #include "sqliteInt.h" */
+
+/* #include "vectorInt.h" */
+
+/* #include <math.h> */
+
+/**************************************************************************
+** Utility routines for debugging
+**************************************************************************/
+
+void vectorF32Dump(const Vector *pVec){
+  float *elems = pVec->data;
+  unsigned i;
+
+  assert( pVec->type == VECTOR_TYPE_FLOAT32 );
+
+  for(i = 0; i < pVec->dims; i++){
+    printf("%f ", elems[i]);
+  }
+  printf("\n");
+}
+
+/**************************************************************************
+** Utility routines for vector serialization and deserialization
+**************************************************************************/
+
+static inline unsigned formatF32(float value, char *pBuf, int nBufSize){
+  sqlite3_snprintf(nBufSize, pBuf, "%g", (double)value);
+  return strlen(pBuf);
+}
+
+static inline unsigned serializeF32(unsigned char *pBuf, float value){
+  u32 *p = (u32 *)&value;
+  pBuf[0] = *p & 0xFF;
+  pBuf[1] = (*p >> 8) & 0xFF;
+  pBuf[2] = (*p >> 16) & 0xFF;
+  pBuf[3] = (*p >> 24) & 0xFF;
+  return sizeof(float);
+}
+
+static inline float deserializeF32(const unsigned char *pBuf){
+  u32 value = 0;
+  value |= (u32)pBuf[0];
+  value |= (u32)pBuf[1] << 8;
+  value |= (u32)pBuf[2] << 16;
+  value |= (u32)pBuf[3] << 24;
+  return *(float *)&value;
+}
+
+size_t vectorF32SerializeToBlob(
+  const Vector *pVector,
+  unsigned char *pBlob,
+  size_t nBlobSize
+){
+  float *elems = pVector->data;
+  unsigned char *pPtr = pBlob;
+  size_t len = 0;
+  unsigned i;
+
+  assert( pVector->type == VECTOR_TYPE_FLOAT32 );
+  assert( pVector->dims <= MAX_VECTOR_SZ );
+  assert( nBlobSize >= pVector->dims * sizeof(float) );
+
+  for(i = 0; i < pVector->dims; i++){
+    pPtr += serializeF32(pPtr, elems[i]);
+  }
+  return sizeof(float) * pVector->dims;
+}
+
+size_t vectorF32DeserializeFromBlob(
+  Vector *pVector,
+  const unsigned char *pBlob,
+  size_t nBlobSize
+){
+  float *elems = pVector->data;
+  unsigned i;
+  pVector->type = VECTOR_TYPE_FLOAT32;
+  pVector->dims = nBlobSize / sizeof(float);
+
+  assert( pVector->dims <= MAX_VECTOR_SZ );
+  assert( nBlobSize % 2 == 0 || pBlob[nBlobSize - 1] == VECTOR_TYPE_FLOAT32 );
+
+  for(i = 0; i < pVector->dims; i++){
+    elems[i] = deserializeF32(pBlob);
+    pBlob += sizeof(float);
+  }
+  return vectorDataSize(pVector->type, pVector->dims);
+}
+
+void vectorF32Serialize(
+  sqlite3_context *context,
+  const Vector *pVector
+){
+  float *elems = pVector->data;
+  unsigned char *pBlob;
+  size_t nBlobSize;
+
+  assert( pVector->type == VECTOR_TYPE_FLOAT32 );
+  assert( pVector->dims <= MAX_VECTOR_SZ );
+
+  nBlobSize = vectorDataSize(pVector->type, pVector->dims);
+
+  if( nBlobSize == 0 ){
+    sqlite3_result_zeroblob(context, 0);
+    return;
+  }
+
+  pBlob = sqlite3_malloc64(nBlobSize);
+  if( pBlob == NULL ){
+    sqlite3_result_error_nomem(context);
+    return;
+  }
+
+  vectorF32SerializeToBlob(pVector, pBlob, nBlobSize);
+  sqlite3_result_blob(context, (char*)pBlob, nBlobSize, sqlite3_free);
+}
+
+#define SINGLE_FLOAT_CHAR_LIMIT 32
+void vectorF32MarshalToText(
+  sqlite3_context *context,
+  const Vector *pVector
+){
+  float *elems = pVector->data;
+  size_t nBufSize;
+  size_t iBuf = 0;
+  char *pText;
+  char valueBuf[SINGLE_FLOAT_CHAR_LIMIT];
+
+  assert( pVector->type == VECTOR_TYPE_FLOAT32 );
+  assert( pVector->dims <= MAX_VECTOR_SZ );
+
+  // there is no trailing comma - so we allocating 1 more extra byte; but this is fine
+  nBufSize = 2 + pVector->dims * (SINGLE_FLOAT_CHAR_LIMIT + 1 /* plus comma */);
+  pText = sqlite3_malloc64(nBufSize);
+  if( pText != NULL ){
+    unsigned i;
+
+    pText[iBuf++]= '[';
+    for(i = 0; i < pVector->dims; i++){
+      unsigned valueLength = formatF32(elems[i], valueBuf, sizeof(valueBuf));
+      memcpy(&pText[iBuf], valueBuf, valueLength);
+      iBuf += valueLength;
+      pText[iBuf++] = ',';
+    }
+    if( pVector->dims > 0 ){
+      iBuf--;
+    }
+    pText[iBuf++] = ']';
+
+    sqlite3_result_text(context, pText, iBuf, sqlite3_free);
+  } else {
+    sqlite3_result_error_nomem(context);
+  }
+}
+
+float vectorF32DistanceCos(const Vector *v1, const Vector *v2){
+  float dot = 0, norm1 = 0, norm2 = 0;
+  float *e1 = v1->data;
+  float *e2 = v2->data;
+  int i;
+
+  assert( v1->dims == v2->dims );
+  assert( v1->type == VECTOR_TYPE_FLOAT32 );
+  assert( v2->type == VECTOR_TYPE_FLOAT32 );
+
+  for(i = 0; i < v1->dims; i++){
+    dot += e1[i]*e2[i];
+    norm1 += e1[i]*e1[i];
+    norm2 += e2[i]*e2[i];
+  }
+  return 1.0 - (dot / sqrt(norm1 * norm2));
+}
+
+void vectorF32InitFromBlob(Vector *pVector, const unsigned char *pBlob, size_t nBlobSize){
+  pVector->dims = nBlobSize / sizeof(float);
+  pVector->data = (void*)pBlob;
+}
+
+int vectorF32ParseSqliteBlob(
+  sqlite3_value *arg,
+  Vector *pVector,
+  char **pzErr
+){
+  const unsigned char *pBlob;
+  float *elems = pVector->data;
+  unsigned i;
+
+  assert( pVector->type == VECTOR_TYPE_FLOAT32 );
+  assert( 0 <= pVector->dims && pVector->dims <= MAX_VECTOR_SZ );
+
+  if( sqlite3_value_type(arg) != SQLITE_BLOB ){
+    *pzErr = sqlite3_mprintf("invalid f32 vector: not a blob type");
+    goto error;
+  }
+
+  pBlob = sqlite3_value_blob(arg);
+  if( sqlite3_value_bytes(arg) < sizeof(float) * pVector->dims ){
+    *pzErr = sqlite3_mprintf("invalid f32 vector: not enough bytes for all dimensions");
+    goto error;
+  }
+
+  for(i = 0; i < pVector->dims; i++){
+    elems[i] = deserializeF32(pBlob);
+    pBlob += sizeof(float);
+  }
+  return 0;
+error:
+  return -1;
+}
+
+#endif /* !defined(SQLITE_OMIT_VECTOR) */
+
+/************** End of vectorfloat32.c ***************************************/
+/************** Begin file vectorfloat64.c ***********************************/
+/*
+** 2024-07-04
+**
+** Copyright 2024 the libSQL authors
+**
+** Permission is hereby granted, free of charge, to any person obtaining a copy of
+** this software and associated documentation files (the "Software"), to deal in
+** the Software without restriction, including without limitation the rights to
+** use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+** the Software, and to permit persons to whom the Software is furnished to do so,
+** subject to the following conditions:
+**
+** The above copyright notice and this permission notice shall be included in all
+** copies or substantial portions of the Software.
+**
+** THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+** IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+** FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+** COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+** IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+** CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+**
+******************************************************************************
+**
+** 64-bit floating point vector format utilities.
+*/
+#ifndef SQLITE_OMIT_VECTOR
+/* #include "sqliteInt.h" */
+
+/* #include "vectorInt.h" */
+
+/* #include <math.h> */
+
+/**************************************************************************
+** Utility routines for debugging
+**************************************************************************/
+
+void vectorF64Dump(const Vector *pVec){
+  double *elems = pVec->data;
+  unsigned i;
+  for(i = 0; i < pVec->dims; i++){
+    printf("%lf ", elems[i]);
+  }
+  printf("\n");
+}
+
+/**************************************************************************
+** Utility routines for vector serialization and deserialization
+**************************************************************************/
+
+static inline unsigned formatF64(double value, char *pBuf, int nBufSize){
+  sqlite3_snprintf(nBufSize, pBuf, "%g", value);
+  return strlen(pBuf);
+}
+
+static inline unsigned serializeF64(unsigned char *pBuf, double value){
+  u64 *p = (u64 *)&value;
+  pBuf[0] = *p & 0xFF;
+  pBuf[1] = (*p >> 8) & 0xFF;
+  pBuf[2] = (*p >> 16) & 0xFF;
+  pBuf[3] = (*p >> 24) & 0xFF;
+  pBuf[4] = (*p >> 32) & 0xFF;
+  pBuf[5] = (*p >> 40) & 0xFF;
+  pBuf[6] = (*p >> 48) & 0xFF;
+  pBuf[7] = (*p >> 56) & 0xFF;
+  return sizeof(double);
+}
+
+static inline double deserializeF64(const unsigned char *pBuf){
+  u64 value = 0;
+  value |= (u64)pBuf[0];
+  value |= (u64)pBuf[1] << 8;
+  value |= (u64)pBuf[2] << 16;
+  value |= (u64)pBuf[3] << 24;
+  value |= (u64)pBuf[4] << 32;
+  value |= (u64)pBuf[5] << 40;
+  value |= (u64)pBuf[6] << 48;
+  value |= (u64)pBuf[7] << 56;
+  return *(double *)&value;
+}
+
+size_t vectorF64SerializeToBlob(
+  const Vector *pVector,
+  unsigned char *pBlob,
+  size_t nBlobSize
+){
+  double *elems = pVector->data;
+  unsigned char *pPtr = pBlob;
+  unsigned i;
+
+  assert( pVector->type == VECTOR_TYPE_FLOAT64 );
+  assert( pVector->dims <= MAX_VECTOR_SZ );
+  assert( nBlobSize >= pVector->dims * sizeof(double) );
+
+  for (i = 0; i < pVector->dims; i++) {
+    pPtr += serializeF64(pPtr, elems[i]);
+  }
+  return sizeof(double) * pVector->dims;
+}
+
+size_t vectorF64DeserializeFromBlob(
+  Vector *pVector,
+  const unsigned char *pBlob,
+  size_t nBlobSize
+){
+  double *elems = pVector->data;
+  unsigned i;
+  pVector->type = VECTOR_TYPE_FLOAT64;
+  pVector->dims = nBlobSize / sizeof(double);
+
+  assert( pVector->dims <= MAX_VECTOR_SZ );
+  assert( nBlobSize % 2 == 1 && pBlob[nBlobSize - 1] == VECTOR_TYPE_FLOAT64 );
+
+  for(i = 0; i < pVector->dims; i++){
+    elems[i] = deserializeF64(pBlob);
+    pBlob += sizeof(double);
+  }
+  return vectorDataSize(pVector->type, pVector->dims);
+}
+
+void vectorF64Serialize(
+  sqlite3_context *context,
+  const Vector *pVector
+){
+  double *elems = pVector->data;
+  unsigned char *pBlob;
+  size_t nBlobSize;
+
+  assert( pVector->type == VECTOR_TYPE_FLOAT64 );
+  assert( pVector->dims <= MAX_VECTOR_SZ );
+
+  // allocate one extra trailing byte with vector blob type metadata
+  nBlobSize = vectorDataSize(pVector->type, pVector->dims) + 1;
+
+  if( nBlobSize == 0 ){
+    sqlite3_result_zeroblob(context, 0);
+    return;
+  }
+
+  pBlob = sqlite3_malloc64(nBlobSize);
+  if( pBlob == NULL ){
+    sqlite3_result_error_nomem(context);
+    return;
+  }
+
+  vectorF64SerializeToBlob(pVector, pBlob, nBlobSize - 1);
+  pBlob[nBlobSize - 1] = VECTOR_TYPE_FLOAT64;
+
+  sqlite3_result_blob(context, (char*)pBlob, nBlobSize, sqlite3_free);
+}
+
+#define SINGLE_DOUBLE_CHAR_LIMIT 32
+void vectorF64MarshalToText(
+  sqlite3_context *context,
+  const Vector *pVector
+){
+  double *elems = pVector->data;
+  size_t nBufSize;
+  size_t iBuf = 0;
+  char *pText;
+  char valueBuf[SINGLE_DOUBLE_CHAR_LIMIT];
+
+  assert( pVector->type == VECTOR_TYPE_FLOAT64 );
+  assert( pVector->dims <= MAX_VECTOR_SZ );
+
+  // there is no trailing comma - so we allocating 1 more extra byte; but this is fine
+  nBufSize = 2 + pVector->dims * (SINGLE_DOUBLE_CHAR_LIMIT + 1 /* plus comma */);
+  pText = sqlite3_malloc64(nBufSize);
+  if( pText != NULL ){
+    unsigned i;
+
+    pText[iBuf++]= '[';
+    for(i = 0; i < pVector->dims; i++){
+      unsigned valueLength = formatF64(elems[i], valueBuf, sizeof(valueBuf));
+      memcpy(&pText[iBuf], valueBuf, valueLength);
+      iBuf += valueLength;
+      pText[iBuf++] = ',';
+    }
+    if( pVector->dims > 0 ){
+      iBuf--;
+    }
+    pText[iBuf++] = ']';
+
+    sqlite3_result_text(context, pText, iBuf, sqlite3_free);
+  } else {
+    sqlite3_result_error_nomem(context);
+  }
+}
+
+double vectorF64DistanceCos(const Vector *v1, const Vector *v2){
+  double dot = 0, norm1 = 0, norm2 = 0;
+  double *e1 = v1->data;
+  double *e2 = v2->data;
+  int i;
+
+  assert( v1->dims == v2->dims );
+  assert( v1->type == VECTOR_TYPE_FLOAT64 );
+  assert( v2->type == VECTOR_TYPE_FLOAT64 );
+
+  for(i = 0; i < v1->dims; i++){
+    dot += e1[i]*e2[i];
+    norm1 += e1[i]*e1[i];
+    norm2 += e2[i]*e2[i];
+  }
+  return 1.0 - (dot / sqrt(norm1 * norm2));
+}
+
+void vectorF64InitFromBlob(Vector *pVector, const unsigned char *pBlob, size_t nBlobSize){
+  pVector->dims = nBlobSize / sizeof(double);
+  pVector->data = (void*)pBlob;
+}
+
+int vectorF64ParseSqliteBlob(
+  sqlite3_value *arg,
+  Vector *pVector,
+  char **pzErr
+){
+  const unsigned char *pBlob;
+  double *elems = pVector->data;
+  unsigned i;
+
+  assert( pVector->type == VECTOR_TYPE_FLOAT64 );
+  assert( 0 <= pVector->dims && pVector->dims <= MAX_VECTOR_SZ );
+
+  if( sqlite3_value_type(arg) != SQLITE_BLOB ){
+    *pzErr = sqlite3_mprintf("invalid f64 vector: not a blob type");
+    goto error;
+  }
+
+  pBlob = sqlite3_value_blob(arg);
+  if( sqlite3_value_bytes(arg) < sizeof(double) * pVector->dims ){
+    *pzErr = sqlite3_mprintf("invalid f64 vector: not enough bytes for all dimensions");
+    goto error;
+  }
+
+  for(i = 0; i < pVector->dims; i++){
+    elems[i] = deserializeF64(pBlob);
+    pBlob += sizeof(double);
+  }
+  return 0;
+error:
+  return -1;
+}
+
+#endif /* !defined(SQLITE_OMIT_VECTOR) */
+
+/************** End of vectorfloat64.c ***************************************/
 /************** Begin file rtree.c *******************************************/
 /*
 ** 2001 September 15
