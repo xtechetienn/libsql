@@ -85036,6 +85036,8 @@ typedef u8 MetricType;
 #define VECTOR_SEARCH_L_PARAM_ID       9
 #define VECTOR_SEARCH_L_DEFAULT        200
 
+#define VECTOR_MAX_NEIGHBORS_PARAM_ID  10
+
 /* total amount of vector index parameters */
 #define VECTOR_PARAM_IDS_COUNT         9
 
@@ -209459,6 +209461,7 @@ SQLITE_PRIVATE void sqlite3RegisterVectorFunctions(void){
 */
 #ifndef SQLITE_OMIT_VECTOR
 
+/* #include "math.h" */
 /* #include "sqliteInt.h" */
 /* #include "vectorIndexInt.h" */
 
@@ -209473,6 +209476,11 @@ SQLITE_PRIVATE void sqlite3RegisterVectorFunctions(void){
 // we render this parts of SQL on stack - thats why we have hard limit on this
 // stack simplify memory managment code and also doesn't impose very strict limits here since 128 bytes for column names should be enough for almost all use cases
 #define DISKANN_SQL_RENDER_LIMIT 128
+
+// limit to the maximum size of DiskANN block (128 MB)
+// even with 1MB we can store tens of thousands of nodes in several GBs - which is already too much
+// but we are "generous" here and allow user to store up to 128MB blobs
+#define DISKANN_MAX_BLOCK_SZ 134217728
 
 /*
  * Due to historical reasons parameter for index block size were stored as u16 value and divided by 512 (2^9)
@@ -209673,8 +209681,16 @@ void blobSpotFree(BlobSpot *pBlobSpot) {
 ** Layout specific utilities
 **************************************************************************/
 
+int nodeEdgeOverhead(int nEdgeVectorSize){
+  return nEdgeVectorSize + VECTOR_EDGE_METADATA_SIZE;
+}
+
+int nodeOverhead(int nNodeVectorSize){
+  return nNodeVectorSize + VECTOR_NODE_METADATA_SIZE;
+}
+
 int nodeEdgesMaxCount(const DiskAnnIndex *pIndex){
-  unsigned int nMaxEdges = (pIndex->nBlockSize - pIndex->nNodeVectorSize - VECTOR_NODE_METADATA_SIZE) / (pIndex->nEdgeVectorSize + VECTOR_EDGE_METADATA_SIZE);
+  unsigned int nMaxEdges = (pIndex->nBlockSize - nodeOverhead(pIndex->nNodeVectorSize)) / nodeEdgeOverhead(pIndex->nEdgeVectorSize);
   assert( nMaxEdges > 0);
   return nMaxEdges;
 }
@@ -209829,6 +209845,8 @@ int diskAnnCreateIndex(
   VectorIdxParams *pParams
 ){
   int rc;
+  int type, dims;
+  u64 maxNeighborsParam, blockSizeBytes;
   char *zSql;
   char columnSqlDefs[DISKANN_SQL_RENDER_LIMIT]; // definition of columns (e.g. index_key INTEGER BINARY, index_key1 TEXT, ...)
   char columnSqlNames[DISKANN_SQL_RENDER_LIMIT]; // just column names (e.g. index_key, index_key1, index_key2, ...)
@@ -209841,13 +209859,31 @@ int diskAnnCreateIndex(
   if( vectorIdxParamsPutU64(pParams, VECTOR_INDEX_TYPE_PARAM_ID, VECTOR_INDEX_TYPE_DISKANN) != 0 ){
     return SQLITE_ERROR;
   }
+  type = vectorIdxParamsGetU64(pParams, VECTOR_TYPE_PARAM_ID);
+  if( type == 0 ){
+    return SQLITE_ERROR;
+  }
+  dims = vectorIdxParamsGetU64(pParams, VECTOR_DIM_PARAM_ID);
+  if( dims == 0 ){
+    return SQLITE_ERROR;
+  }
+  assert( 0 < dims && dims <= MAX_VECTOR_SZ );
+
+  maxNeighborsParam = vectorIdxParamsGetU64(pParams, VECTOR_MAX_NEIGHBORS_PARAM_ID);
+  if( maxNeighborsParam == 0 ){
+    // 3 D**(1/2) gives good recall values (90%+)
+    // we also want to keep disk overhead at moderate level - 50x of the disk size increase is the current upper bound
+    maxNeighborsParam = MIN(3 * ((int)(sqrt(dims)) + 1), (50 * nodeOverhead(vectorDataSize(type, dims))) / nodeEdgeOverhead(vectorDataSize(type, dims)) + 1);
+  }
+  blockSizeBytes = nodeOverhead(vectorDataSize(type, dims)) + maxNeighborsParam * (u64)nodeEdgeOverhead(vectorDataSize(type, dims));
+  if( blockSizeBytes > DISKANN_MAX_BLOCK_SZ ){
+    return SQLITE_ERROR;
+  }
+  if( vectorIdxParamsPutU64(pParams, VECTOR_BLOCK_SIZE_PARAM_ID, MAX(256, blockSizeBytes))  != 0 ){
+    return SQLITE_ERROR;
+  }
   if( vectorIdxParamsGetU64(pParams, VECTOR_METRIC_TYPE_PARAM_ID) == 0 ){
     if( vectorIdxParamsPutU64(pParams, VECTOR_METRIC_TYPE_PARAM_ID, VECTOR_METRIC_TYPE_COS) != 0 ){
-      return SQLITE_ERROR;
-    }
-  }
-  if( vectorIdxParamsGetU64(pParams, VECTOR_BLOCK_SIZE_PARAM_ID) == 0 ){
-    if( vectorIdxParamsPutU64(pParams, VECTOR_BLOCK_SIZE_PARAM_ID, VECTOR_BLOCK_SIZE_DEFAULT) != 0 ){
       return SQLITE_ERROR;
     }
   }
@@ -210840,6 +210876,7 @@ int diskAnnOpenIndex(
   DiskAnnIndex **ppIndex             /* OUT: Index */
 ){
   DiskAnnIndex *pIndex;
+  u64 nBlockSize;
   pIndex = sqlite3DbMallocRaw(db, sizeof(DiskAnnIndex));
   if( pIndex == NULL ){
     return SQLITE_NOMEM;
@@ -210852,9 +210889,15 @@ int diskAnnOpenIndex(
     diskAnnCloseIndex(pIndex);
     return SQLITE_NOMEM_BKPT;
   }
+  nBlockSize = vectorIdxParamsGetU64(pParams, VECTOR_BLOCK_SIZE_PARAM_ID);
+  // preserve backward compatibility: treat block size > 128 literally, but <= 128 with shift
+  if( nBlockSize <= 128 ){
+    nBlockSize <<= DISKANN_BLOCK_SIZE_SHIFT;
+  }
+
   pIndex->nFormatVersion = vectorIdxParamsGetU64(pParams, VECTOR_FORMAT_PARAM_ID);
   pIndex->nDistanceFunc = vectorIdxParamsGetU64(pParams, VECTOR_METRIC_TYPE_PARAM_ID);
-  pIndex->nBlockSize = vectorIdxParamsGetU64(pParams, VECTOR_BLOCK_SIZE_PARAM_ID) << DISKANN_BLOCK_SIZE_SHIFT;
+  pIndex->nBlockSize = nBlockSize;
   pIndex->nNodeVectorType = vectorIdxParamsGetU64(pParams, VECTOR_TYPE_PARAM_ID);
   pIndex->nVectorDims = vectorIdxParamsGetU64(pParams, VECTOR_DIM_PARAM_ID);
   pIndex->pruningAlpha = vectorIdxParamsGetF64(pParams, VECTOR_PRUNING_ALPHA_PARAM_ID);
@@ -211810,18 +211853,19 @@ static struct VectorColumnType VECTOR_COLUMN_TYPES[] = {
 struct VectorParamName {
   const char *zName;
   int tag;
-  int type; // 0 - enum, 1 - integer, 2 - float
+  int type; // 0 - string enum, 1 - integer, 2 - float
   const char *zValueStr;
   u64 value;
 };
 
 static struct VectorParamName VECTOR_PARAM_NAMES[] = {
-  { "type",     VECTOR_INDEX_TYPE_PARAM_ID, 0, "diskann", VECTOR_INDEX_TYPE_DISKANN },
-  { "metric",   VECTOR_METRIC_TYPE_PARAM_ID, 0, "cosine", VECTOR_METRIC_TYPE_COS },
-  { "metric",   VECTOR_METRIC_TYPE_PARAM_ID, 0, "l2",     VECTOR_METRIC_TYPE_L2 },
-  { "alpha",    VECTOR_PRUNING_ALPHA_PARAM_ID, 2, 0, 0 },
-  { "search_l", VECTOR_SEARCH_L_PARAM_ID, 1, 0, 0 },
-  { "insert_l", VECTOR_INSERT_L_PARAM_ID, 2, 0, 0 },
+  { "type",          VECTOR_INDEX_TYPE_PARAM_ID,    0, "diskann", VECTOR_INDEX_TYPE_DISKANN },
+  { "metric",        VECTOR_METRIC_TYPE_PARAM_ID,   0, "cosine", VECTOR_METRIC_TYPE_COS },
+  { "metric",        VECTOR_METRIC_TYPE_PARAM_ID,   0, "l2",     VECTOR_METRIC_TYPE_L2 },
+  { "alpha",         VECTOR_PRUNING_ALPHA_PARAM_ID, 2, 0, 0 },
+  { "search_l",      VECTOR_SEARCH_L_PARAM_ID,      1, 0, 0 },
+  { "insert_l",      VECTOR_INSERT_L_PARAM_ID,      1, 0, 0 },
+  { "max_neighbors", VECTOR_MAX_NEIGHBORS_PARAM_ID, 1, 0, 0 },
 };
 
 static int parseVectorIdxParam(const char *zParam, VectorIdxParams *pParams, const char **pErrMsg) {
@@ -211841,9 +211885,13 @@ static int parseVectorIdxParam(const char *zParam, VectorIdxParams *pParams, con
       continue;
     }
     if( VECTOR_PARAM_NAMES[i].type == 1 ){
-      u64 value = sqlite3Atoi(zValue);
+      int value = sqlite3Atoi(zValue);
       if( value == 0 ){
         *pErrMsg = "invalid representation of integer vector index parameter";
+        return -1;
+      }
+      if( value < 0 ){
+        *pErrMsg = "integer vector index parameter must be positive";
         return -1;
       }
       if( vectorIdxParamsPutU64(pParams, VECTOR_PARAM_NAMES[i].tag, value) != 0 ){
