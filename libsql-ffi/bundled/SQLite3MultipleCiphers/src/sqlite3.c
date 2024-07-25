@@ -23550,6 +23550,7 @@ struct VdbeCursor {
   Bool isEphemeral:1;     /* True for an ephemeral table */
   Bool useRandomRowid:1;  /* Generate new record numbers semi-randomly */
   Bool isOrdered:1;       /* True if the table is not BTREE_UNORDERED */
+  Bool isTracked:1;       /* True if cursor created for virtual table which track reads/writes */
   Bool noReuse:1;         /* OpenEphemeral may not reuse this cursor */
   Bool colCache:1;        /* pCache pointer is initialized and non-NULL */
   u16 seekHit;            /* See the OP_SeekHit and OP_IfNoHope opcodes */
@@ -23981,6 +23982,8 @@ struct Vdbe {
 #endif
 };
 
+void libsql_inc_row_read(Vdbe *p, int count);
+void libsql_inc_row_written(Vdbe *p, int count);
 /*
 ** The following are allowed values for Vdbe.eVdbeState
 */
@@ -84936,6 +84939,9 @@ struct DiskAnnIndex {
   float pruningAlpha;  /* Alpha parameter for edge pruning during INSERT operation */
   int insertL;         /* Max size of candidate set (L) visited during INSERT operation */
   int searchL;         /* Max size of candidate set (L) visited during SEARCH operation (can be overriden from query in future) */
+
+  int nReads;
+  int nWrites;
 };
 
 /*
@@ -84961,8 +84967,8 @@ struct BlobSpot {
 
 /* BlobSpot operations */
 int blobSpotCreate(const DiskAnnIndex *pIndex, BlobSpot **ppBlobSpot, u64 nRowid, int nBufferSize, int isWritable);
-int blobSpotReload(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, u64 nRowid, int nBufferSize);
-int blobSpotFlush(BlobSpot *pBlobSpot);
+int blobSpotReload(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, u64 nRowid, int nBufferSize);
+int blobSpotFlush(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot);
 void blobSpotFree(BlobSpot *pBlobSpot);
 
 /*
@@ -85126,9 +85132,9 @@ int diskAnnClearIndex(sqlite3 *, const char *, const char *);
 int diskAnnDropIndex(sqlite3 *, const char *, const char *);
 int diskAnnOpenIndex(sqlite3 *, const char *, const char *, const VectorIdxParams *, DiskAnnIndex **);
 void diskAnnCloseIndex(DiskAnnIndex *);
-int diskAnnInsert(const DiskAnnIndex *, const VectorInRow *, char **);
-int diskAnnDelete(const DiskAnnIndex *, const VectorInRow *, char **);
-int diskAnnSearch(const DiskAnnIndex *, const Vector *, int, const VectorIdxKey *, VectorOutRows *, char **);
+int diskAnnInsert(DiskAnnIndex *, const VectorInRow *, char **);
+int diskAnnDelete(DiskAnnIndex *, const VectorInRow *, char **);
+int diskAnnSearch(DiskAnnIndex *, const Vector *, int, const VectorIdxKey *, VectorOutRows *, char **);
 
 typedef struct VectorIdxCursor VectorIdxCursor;
 
@@ -85141,9 +85147,9 @@ int vectorIdxParseColumnType(const char *, int *, int *, const char **);
 int vectorIndexCreate(Parse*, const Index*, const char *, const IdList*);
 int vectorIndexClear(sqlite3 *, const char *, const char *);
 int vectorIndexDrop(sqlite3 *, const char *, const char *);
-int vectorIndexSearch(sqlite3 *, const char *, int, sqlite3_value **, VectorOutRows *, char **);
+int vectorIndexSearch(sqlite3 *, const char *, int, sqlite3_value **, VectorOutRows *, int *, int *, char **);
 int vectorIndexCursorInit(sqlite3 *, const char *, const char *, VectorIdxCursor **);
-void vectorIndexCursorClose(sqlite3 *, VectorIdxCursor *);
+void vectorIndexCursorClose(sqlite3 *, VectorIdxCursor *, int *, int *);
 int vectorIndexInsert(VectorIdxCursor *, const UnpackedRecord *, char **);
 int vectorIndexDelete(VectorIdxCursor *, const UnpackedRecord *, char **);
 
@@ -87852,6 +87858,13 @@ SQLITE_PRIVATE void sqlite3VdbeMakeReady(
 SQLITE_PRIVATE void sqlite3VdbeFreeCursor(Vdbe *p, VdbeCursor *pCx){
   if( pCx ) sqlite3VdbeFreeCursorNN(p,pCx);
 }
+
+struct sqlite3_vtab_cursor_tracked {
+  sqlite3_vtab_cursor base;  /* Base class - must be first */
+  int nReads;                /* Number of row read from the storage backing virtual table */
+  int nWrites;               /* Number of row written to the storage backing virtual table */
+};
+
 static SQLITE_NOINLINE void freeCursorWithCache(Vdbe *p, VdbeCursor *pCx){
   VdbeTxtBlbCache *pCache = pCx->pCache;
   assert( pCx->colCache );
@@ -87881,9 +87894,15 @@ SQLITE_PRIVATE void sqlite3VdbeFreeCursorNN(Vdbe *p, VdbeCursor *pCx){
     }
 #ifndef SQLITE_OMIT_VIRTUALTABLE
     case CURTYPE_VTAB: {
+      struct sqlite3_vtab_cursor_tracked *pTracked;
       sqlite3_vtab_cursor *pVCur = pCx->uc.pVCur;
       const sqlite3_module *pModule = pVCur->pVtab->pModule;
       assert( pVCur->pVtab->nRef>0 );
+      if( pCx->isTracked ){
+        pTracked = (struct sqlite3_vtab_cursor_tracked*)pVCur;
+        libsql_inc_row_read(p, pTracked->nReads);
+        libsql_inc_row_written(p, pTracked->nWrites);
+      }
       pVCur->pVtab->nRef--;
       pModule->xClose(pVCur);
       break;
@@ -87891,7 +87910,10 @@ SQLITE_PRIVATE void sqlite3VdbeFreeCursorNN(Vdbe *p, VdbeCursor *pCx){
 #endif
 #ifndef SQLITE_OMIT_VECTOR
     case CURTYPE_VECTOR_IDX: {
-      vectorIndexCursorClose(p->db, pCx->uc.pVecIdx);
+      int nReads, nWrites;
+      vectorIndexCursorClose(p->db, pCx->uc.pVecIdx, &nReads, &nWrites);
+      libsql_inc_row_read(p, nReads);
+      libsql_inc_row_written(p, nWrites);
       break;
     }
 #endif
@@ -94181,12 +94203,12 @@ static u32 saturating_add(u32 lhs, u32 rhs) {
     return (u32)MIN(0xFFFFFFFF, sum);
 }
 
-static void inc_row_read(Vdbe *p, int count) {
+void libsql_inc_row_read(Vdbe *p, int count) {
     u32 *read = &p->aLibsqlCounter[LIBSQL_STMTSTATUS_ROWS_READ - LIBSQL_STMTSTATUS_BASE];
     *read = saturating_add(*read, count);
 }
 
-static void inc_row_written(Vdbe *p, int count) {
+void libsql_inc_row_written(Vdbe *p, int count) {
     u32 *write = &p->aLibsqlCounter[LIBSQL_STMTSTATUS_ROWS_WRITTEN - LIBSQL_STMTSTATUS_BASE];
     *write = saturating_add(*write, count);
 }
@@ -97106,7 +97128,7 @@ case OP_Count: {         /* out2 */
     nEntry = 0;  /* Not needed.  Only used to silence a warning. */
     i64 nPages = 0;
     rc = sqlite3BtreeCount(db, pCrsr, &nEntry, &nPages);
-    inc_row_read(p, nPages);
+    libsql_inc_row_read(p, nPages);
     if( rc ) goto abort_due_to_error;
   }
   pOut = out2Prerelease(p, pOp);
@@ -98308,7 +98330,7 @@ case OP_SeekGT: {       /* jump, in3, group, ncycle */
       goto seek_not_found;
     }
   }
-  inc_row_read(p, 1);
+  libsql_inc_row_read(p, 1);
 #ifdef SQLITE_TEST
   sqlite3_search_count++;
 #endif
@@ -98878,7 +98900,7 @@ notExistsWithKey:
   pC->deferredMoveto = 0;
   VdbeBranchTaken(res!=0,2);
   pC->seekResult = res;
-  inc_row_read(p, 1);
+  libsql_inc_row_read(p, 1);
   if( res!=0 ){
     assert( rc==SQLITE_OK );
     if( pOp->p2==0 ){
@@ -99180,7 +99202,7 @@ case OP_Insert: {
 #endif
 
   assert( (pOp->p5 & OPFLAG_LASTROWID)==0 || (pOp->p5 & OPFLAG_NCHANGE)!=0 );
-  if (!pC->isEphemeral) inc_row_written(p, 1);
+  if (!pC->isEphemeral) libsql_inc_row_written(p, 1);
 
   if( pOp->p5 & OPFLAG_NCHANGE ){
     p->nChange++;
@@ -99375,7 +99397,7 @@ case OP_Delete: {
 
   /* Invoke the update-hook if required. */
   if( opflags & OPFLAG_NCHANGE ){
-    if (!pC->isEphemeral) inc_row_written(p, 1);
+    if (!pC->isEphemeral) libsql_inc_row_written(p, 1);
     p->nChange++;
     if( db->xUpdateCallback && ALWAYS(pTab!=0) && HasRowid(pTab) ){
       db->xUpdateCallback(db->pUpdateArg, SQLITE_DELETE, zDb, pTab->zName,
@@ -99663,7 +99685,7 @@ case OP_Last: {              /* jump, ncycle */
   pC->deferredMoveto = 0;
   pC->cacheStatus = CACHE_STALE;
   if( rc ) goto abort_due_to_error;
-  inc_row_read(p, 1);
+  libsql_inc_row_read(p, 1);
   if( pOp->p2>0 ){
     VdbeBranchTaken(res!=0,2);
     if( res ) goto jump_to_p2;
@@ -99773,7 +99795,7 @@ case OP_Rewind: {        /* jump, ncycle */
   }
   if( rc ) goto abort_due_to_error;
   pC->nullRow = (u8)res;
-  inc_row_read(p, 1);
+  libsql_inc_row_read(p, 1);
   if( pOp->p2>0 ){
     VdbeBranchTaken(res!=0,2);
     if( res ) goto jump_to_p2;
@@ -99879,7 +99901,7 @@ next_tail:
   if( rc==SQLITE_OK ){
     pC->nullRow = 0;
     p->aCounter[pOp->p5]++;
-  inc_row_read(p, 1);
+  libsql_inc_row_read(p, 1);
 #ifdef SQLITE_TEST
     sqlite3_search_count++;
 #endif
@@ -99931,7 +99953,7 @@ case OP_IdxInsert: {        /* in2 */
   pIn2 = &aMem[pOp->p2];
   assert( (pIn2->flags & MEM_Blob) || (pOp->p5 & OPFLAG_PREFORMAT) );
   if( pOp->p5 & OPFLAG_NCHANGE ) p->nChange++;
-  if (!pC->isEphemeral) inc_row_written(p, 1);
+  if (!pC->isEphemeral) libsql_inc_row_written(p, 1);
 #ifndef SQLITE_OMIT_VECTOR
   if( isVectorCursor(pC) ) {
     UnpackedRecord idxKeyStatic;
@@ -100383,7 +100405,7 @@ case OP_Clear: {
   rc = sqlite3BtreeClearTable(db->aDb[pOp->p2].pBt, (u32)pOp->p1, &nChange);
   if( pOp->p3 ){
     p->nChange += nChange;
-    inc_row_written(p, nChange);
+    libsql_inc_row_written(p, nChange);
     if( pOp->p3>0 ){
       assert( memIsValid(&aMem[pOp->p3]) );
       memAboutToChange(p, &aMem[pOp->p3]);
@@ -101696,6 +101718,11 @@ case OP_VOpen: {             /* ncycle */
   if( pCur ){
     pCur->uc.pVCur = pVCur;
     pVtab->nRef++;
+#ifndef SQLITE_OMIT_VECTOR
+    if( sqlite3StrICmp(pOp->p4.pVtab->pMod->zName, VECTOR_INDEX_VTAB_NAME) == 0 ){
+      pCur->isTracked = 1;
+    }
+#endif
   }else{
     assert( db->mallocFailed );
     pModule->xClose(pVCur);
@@ -101970,7 +101997,7 @@ case OP_VNext: {   /* jump, ncycle */
   rc = pModule->xNext(pCur->uc.pVCur);
   sqlite3VtabImportErrmsg(p, pVtab);
   if( rc ) goto abort_due_to_error;
-  inc_row_read(p, 1);
+  libsql_inc_row_read(p, 1);
   res = pModule->xEof(pCur->uc.pVCur);
   VdbeBranchTaken(!res,2);
   if( !res ){
@@ -102092,7 +102119,7 @@ case OP_VUpdate: {
         p->errorAction = ((pOp->p5==OE_Replace) ? OE_Abort : pOp->p5);
       }
     }else{
-        inc_row_written(p, 1);
+        libsql_inc_row_written(p, 1);
         p->nChange++;
     }
     if( rc ) goto abort_due_to_error;
@@ -209633,7 +209660,7 @@ out:
   return rc;
 }
 
-int blobSpotReload(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, u64 nRowid, int nBufferSize) {
+int blobSpotReload(DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, u64 nRowid, int nBufferSize) {
   int rc;
 
   DiskAnnTrace(("blob spot reload: rowid=%lld\n", nRowid));
@@ -209675,6 +209702,7 @@ int blobSpotReload(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, u64 nRowid, 
   if( rc != SQLITE_OK ){
     goto abort;
   }
+  pIndex->nReads++;
   pBlobSpot->isInitialized = 1;
   return SQLITE_OK;
 
@@ -209684,8 +209712,13 @@ abort:
   return rc;
 }
 
-int blobSpotFlush(BlobSpot *pBlobSpot) {
-  return sqlite3_blob_write(pBlobSpot->pBlob, pBlobSpot->pBuffer, pBlobSpot->nBufferSize, 0);
+int blobSpotFlush(DiskAnnIndex* pIndex, BlobSpot *pBlobSpot) {
+  int rc = sqlite3_blob_write(pBlobSpot->pBlob, pBlobSpot->pBuffer, pBlobSpot->nBufferSize, 0);
+  if( rc != SQLITE_OK ){
+    return rc;
+  }
+  pIndex->nWrites++;
+  return rc;
 }
 
 void blobSpotFree(BlobSpot *pBlobSpot) {
@@ -210518,7 +210551,7 @@ static void diskAnnPruneEdges(const DiskAnnIndex *pIndex, BlobSpot *pNodeBlob, i
 }
 
 // main search routine - called from both SEARCH and INSERT operation
-static int diskAnnSearchInternal(const DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u64 nStartRowid, char **pzErrMsg){
+static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u64 nStartRowid, char **pzErrMsg){
   DiskAnnTrace(("diskAnnSearchInternal: ready to search: rootId=%lld\n", nStartRowid));
   DiskAnnNode *start = NULL;
   // in case of SEARCH operation (blobMode == DISKANN_BLOB_READONLY) we don't need to preserve all node blobs in the memory
@@ -210651,7 +210684,7 @@ out:
 
 // search k nearest neighbours for pVector in the pIndex (with pKey primary key structure) and put result in the pRows output
 int diskAnnSearch(
-  const DiskAnnIndex *pIndex,
+  DiskAnnIndex *pIndex,
   const Vector *pVector,
   int k,
   const VectorIdxKey *pKey,
@@ -210723,7 +210756,7 @@ out:
 
 // insert pVectorInRow in the pIndex
 int diskAnnInsert(
-  const DiskAnnIndex *pIndex,
+  DiskAnnIndex *pIndex,
   const VectorInRow *pVectorInRow,
   char **pzErrMsg
 ){
@@ -210810,7 +210843,7 @@ int diskAnnInsert(
     nodeBinReplaceEdge(pIndex, pVisited->pBlobSpot, iReplace, nNewRowid, pVectorInRow->pVector);
     diskAnnPruneEdges(pIndex, pVisited->pBlobSpot, iReplace);
 
-    rc = blobSpotFlush(pVisited->pBlobSpot);
+    rc = blobSpotFlush(pIndex, pVisited->pBlobSpot);
     if( rc != SQLITE_OK ){
       *pzErrMsg = sqlite3_mprintf("vector index(insert): failed to flush blob");
       goto out;
@@ -210820,7 +210853,7 @@ int diskAnnInsert(
   rc = SQLITE_OK;
 out:
   if( rc == SQLITE_OK ){
-    rc = blobSpotFlush(pBlobSpot);
+    rc = blobSpotFlush(pIndex, pBlobSpot);
     if( rc != SQLITE_OK ){
       *pzErrMsg = sqlite3_mprintf("vector index(insert): failed to flush blob");
     }
@@ -210834,7 +210867,7 @@ out:
 
 // delete pInRow from pIndex
 int diskAnnDelete(
-  const DiskAnnIndex *pIndex,
+  DiskAnnIndex *pIndex,
   const VectorInRow *pInRow,
   char **pzErrMsg
 ){
@@ -210883,7 +210916,7 @@ int diskAnnDelete(
       continue;
     }
     nodeBinDeleteEdge(pIndex, pEdgeBlob, iDelete);
-    rc = blobSpotFlush(pEdgeBlob);
+    rc = blobSpotFlush(pIndex, pEdgeBlob);
     if( rc != SQLITE_OK ){
       *pzErrMsg = sqlite3_mprintf("vector index(delete): failed to flush blob for edge row");
       goto out;
@@ -210943,6 +210976,8 @@ int diskAnnOpenIndex(
   pIndex->pruningAlpha = vectorIdxParamsGetF64(pParams, VECTOR_PRUNING_ALPHA_PARAM_ID);
   pIndex->insertL = vectorIdxParamsGetU64(pParams, VECTOR_INSERT_L_PARAM_ID);
   pIndex->searchL = vectorIdxParamsGetU64(pParams, VECTOR_SEARCH_L_PARAM_ID);
+  pIndex->nReads = 0;
+  pIndex->nWrites = 0;
   if( pIndex->nDistanceFunc == 0 ||
       pIndex->nBlockSize == 0 ||
       pIndex->nNodeVectorType == 0 ||
@@ -212452,7 +212487,16 @@ int vectorIndexCreate(Parse *pParse, const Index *pIdx, const char *zDbSName, co
   return CREATE_OK;
 }
 
-int vectorIndexSearch(sqlite3 *db, const char* zDbSName, int argc, sqlite3_value **argv, VectorOutRows *pRows, char **pzErrMsg) {
+int vectorIndexSearch(
+  sqlite3 *db,
+  const char* zDbSName,
+  int argc,
+  sqlite3_value **argv,
+  VectorOutRows *pRows,
+  int *nReads,
+  int *nWrites,
+  char **pzErrMsg
+) {
   int type, dims, k, rc;
   const char *zIdxName;
   const char *zErrMsg;
@@ -212530,6 +212574,8 @@ int vectorIndexSearch(sqlite3 *db, const char* zDbSName, int argc, sqlite3_value
   rc = diskAnnSearch(pDiskAnn, pVector, k, &pKey, pRows, pzErrMsg);
 out:
   if( pDiskAnn != NULL ){
+    *nReads += pDiskAnn->nReads;
+    *nWrites += pDiskAnn->nWrites;
     diskAnnCloseIndex(pDiskAnn);
   }
   if( pVector != NULL ){
@@ -212609,7 +212655,10 @@ int vectorIndexCursorInit(
   return SQLITE_OK;
 }
 
-void vectorIndexCursorClose(sqlite3 *db, VectorIdxCursor *pCursor){
+void vectorIndexCursorClose(sqlite3 *db, VectorIdxCursor *pCursor, int *nReads, int *nWrites){
+  *nReads = pCursor->pIndex->nReads;
+  *nWrites = pCursor->pIndex->nWrites;
+
   diskAnnCloseIndex(pCursor->pIndex);
   sqlite3DbFree(db, pCursor);
 }
@@ -212658,7 +212707,10 @@ struct vectorVtab {
 
 typedef struct vectorVtab_cursor vectorVtab_cursor;
 struct vectorVtab_cursor {
+  // first fields must copy fields from the sqlite3_vtab_cursor_tracked struct
   sqlite3_vtab_cursor base;  /* Base class - must be first */
+  int nReads;                /* Number of row read from the storage backing virtual table */
+  int nWrites;               /* Number of row written to the storage backing virtual table */
   VectorOutRows rows;
   int iRow;
 };
@@ -212713,7 +212765,7 @@ static int vectorVtabDisconnect(sqlite3_vtab *pVtab){
 static int vectorVtabOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **ppCursor){
   vectorVtab *pVTab = (vectorVtab*)p;
   vectorVtab_cursor *pCur;
-  pCur = sqlite3_malloc( sizeof(*pCur) );
+  pCur = sqlite3_malloc( sizeof(vectorVtab_cursor) );
   if( pCur == NULL ){
     return SQLITE_NOMEM;
   }
@@ -212772,7 +212824,7 @@ static int vectorVtabFilter(
   pCur->rows.aIntValues = NULL;
   pCur->rows.ppValues = NULL;
 
-  if( vectorIndexSearch(pVTab->db, pVTab->zDbSName, argc, argv, &pCur->rows, &pVTab->base.zErrMsg) != 0 ){
+  if( vectorIndexSearch(pVTab->db, pVTab->zDbSName, argc, argv, &pCur->rows, &pCur->nReads, &pCur->nWrites, &pVTab->base.zErrMsg) != 0 ){
     return SQLITE_ERROR;
   }
 
