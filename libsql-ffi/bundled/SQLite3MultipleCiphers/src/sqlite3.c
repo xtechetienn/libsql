@@ -14548,15 +14548,17 @@ SQLITE_API void libsql_wasm_engine_free(libsql_wasm_engine_t *);
 #  endif
 #endif
 
-/*
-** Enable SQLITE_USE_SEH by default on MSVC builds.  Only omit
-** SEH support if the -DSQLITE_OMIT_SEH option is given.
-*/
-#if defined(_MSC_VER) && !defined(SQLITE_OMIT_SEH)
-# define SQLITE_USE_SEH 1
-#else
-# undef SQLITE_USE_SEH
-#endif
+
+// SEH is not supported in libSQL.
+// /*
+// ** Enable SQLITE_USE_SEH by default on MSVC builds.  Only omit
+// ** SEH support if the -DSQLITE_OMIT_SEH option is given.
+// */
+// #if defined(_MSC_VER) && !defined(SQLITE_OMIT_SEH)
+// # define SQLITE_USE_SEH 1
+// #else
+// # undef SQLITE_USE_SEH
+// #endif
 
 /*
 ** Enable SQLITE_DIRECT_OVERFLOW_READ, unless the build explicitly
