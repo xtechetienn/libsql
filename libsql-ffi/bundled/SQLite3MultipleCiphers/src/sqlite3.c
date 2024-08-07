@@ -28,6 +28,7 @@
 **    README.md
 **    configure
 **    configure.ac
+**    ext/fts5/fts5_tokenize.c
 **    ext/jni/src/org/sqlite/jni/capi/CollationNeededCallback.java
 **    ext/jni/src/org/sqlite/jni/capi/CommitHookCallback.java
 **    ext/jni/src/org/sqlite/jni/capi/PreupdateHookCallback.java
@@ -259750,40 +259751,46 @@ static int fts5TriCreate(
   Fts5Tokenizer **ppOut
 ){
   int rc = SQLITE_OK;
-  TrigramTokenizer *pNew = (TrigramTokenizer*)sqlite3_malloc(sizeof(*pNew));
-  UNUSED_PARAM(pUnused);
-  if( pNew==0 ){
-    rc = SQLITE_NOMEM;
+  TrigramTokenizer *pNew = 0;
+
+  if( nArg%2 ){
+    rc = SQLITE_ERROR;
   }else{
-    int i;
-    pNew->bFold = 1;
-    pNew->iFoldParam = 0;
-    for(i=0; rc==SQLITE_OK && i<nArg; i+=2){
-      const char *zArg = azArg[i+1];
-      if( 0==sqlite3_stricmp(azArg[i], "case_sensitive") ){
-        if( (zArg[0]!='0' && zArg[0]!='1') || zArg[1] ){
-          rc = SQLITE_ERROR;
+    pNew = (TrigramTokenizer*)sqlite3_malloc(sizeof(*pNew));
+    UNUSED_PARAM(pUnused);
+    if( pNew==0 ){
+      rc = SQLITE_NOMEM;
+    }else{
+      int i;
+      pNew->bFold = 1;
+      pNew->iFoldParam = 0;
+      for(i=0; rc==SQLITE_OK && i<nArg; i+=2){
+        const char *zArg = azArg[i+1];
+        if( 0==sqlite3_stricmp(azArg[i], "case_sensitive") ){
+          if( (zArg[0]!='0' && zArg[0]!='1') || zArg[1] ){
+            rc = SQLITE_ERROR;
+          }else{
+            pNew->bFold = (zArg[0]=='0');
+          }
+        }else if( 0==sqlite3_stricmp(azArg[i], "remove_diacritics") ){
+          if( (zArg[0]!='0' && zArg[0]!='1' && zArg[0]!='2') || zArg[1] ){
+            rc = SQLITE_ERROR;
+          }else{
+            pNew->iFoldParam = (zArg[0]!='0') ? 2 : 0;
+          }
         }else{
-          pNew->bFold = (zArg[0]=='0');
-        }
-      }else if( 0==sqlite3_stricmp(azArg[i], "remove_diacritics") ){
-        if( (zArg[0]!='0' && zArg[0]!='1' && zArg[0]!='2') || zArg[1] ){
           rc = SQLITE_ERROR;
-        }else{
-          pNew->iFoldParam = (zArg[0]!='0') ? 2 : 0;
         }
-      }else{
+      }
+
+      if( pNew->iFoldParam!=0 && pNew->bFold==0 ){
         rc = SQLITE_ERROR;
       }
-    }
 
-    if( pNew->iFoldParam!=0 && pNew->bFold==0 ){
-      rc = SQLITE_ERROR;
-    }
-
-    if( rc!=SQLITE_OK ){
-      fts5TriDelete((Fts5Tokenizer*)pNew);
-      pNew = 0;
+      if( rc!=SQLITE_OK ){
+        fts5TriDelete((Fts5Tokenizer*)pNew);
+        pNew = 0;
+      }
     }
   }
   *ppOut = (Fts5Tokenizer*)pNew;
