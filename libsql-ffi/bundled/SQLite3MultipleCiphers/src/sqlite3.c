@@ -85246,6 +85246,7 @@ typedef u32 VectorDims;
 */
 #define VECTOR_TYPE_FLOAT32 1
 #define VECTOR_TYPE_FLOAT64 2
+#define VECTOR_TYPE_1BIT    3
 
 #define VECTOR_FLAGS_STATIC 1
 
@@ -85270,8 +85271,9 @@ void vectorInit(Vector *, VectorType, VectorDims, void *);
  * Dumps vector on the console (used only for debugging)
 */
 void vectorDump   (const Vector *v);
-void vectorF32Dump(const Vector *v);
-void vectorF64Dump(const Vector *v);
+void vectorF32Dump (const Vector *v);
+void vectorF64Dump (const Vector *v);
+void vector1BitDump(const Vector *v);
 
 /*
  * Converts vector to the text representation and write the result to the sqlite3_context
@@ -85283,16 +85285,10 @@ void vectorF64MarshalToText(sqlite3_context *, const Vector *);
 /*
  * Serializes vector to the blob in little-endian format according to the IEEE-754 standard
 */
-size_t vectorSerializeToBlob   (const Vector *, unsigned char *, size_t);
-size_t vectorF32SerializeToBlob(const Vector *, unsigned char *, size_t);
-size_t vectorF64SerializeToBlob(const Vector *, unsigned char *, size_t);
-
-/*
- * Deserializes vector from the blob in little-endian format according to the IEEE-754 standard
-*/
-size_t vectorDeserializeFromBlob   (Vector *, const unsigned char *, size_t);
-size_t vectorF32DeserializeFromBlob(Vector *, const unsigned char *, size_t);
-size_t vectorF64DeserializeFromBlob(Vector *, const unsigned char *, size_t);
+size_t vectorSerializeToBlob    (const Vector *, unsigned char *, size_t);
+size_t vectorF32SerializeToBlob (const Vector *, unsigned char *, size_t);
+size_t vectorF64SerializeToBlob (const Vector *, unsigned char *, size_t);
+size_t vector1BitSerializeToBlob(const Vector *, unsigned char *, size_t);
 
 /*
  * Calculates cosine distance between two vectors (vector must have same type and same dimensions)
@@ -85300,6 +85296,11 @@ size_t vectorF64DeserializeFromBlob(Vector *, const unsigned char *, size_t);
 float vectorDistanceCos    (const Vector *, const Vector *);
 float vectorF32DistanceCos (const Vector *, const Vector *);
 double vectorF64DistanceCos(const Vector *, const Vector *);
+
+/*
+ * Calculates hamming distance between two 1-bit vectors (vector must have same dimensions)
+*/
+int vector1BitDistanceHamming(const Vector *, const Vector *);
 
 /*
  * Calculates L2 distance between two vectors (vector must have same type and same dimensions)
@@ -85313,21 +85314,22 @@ double vectorF64DistanceL2(const Vector *, const Vector *);
  * LibSQL can append one trailing byte in the end of final blob. This byte will be later used to determine type of the blob
  * By default, blob with even length will be treated as a f32 blob
 */
-void vectorSerialize   (sqlite3_context *, const Vector *);
-void vectorF32Serialize(sqlite3_context *, const Vector *);
-void vectorF64Serialize(sqlite3_context *, const Vector *);
+void vectorSerializeWithType(sqlite3_context *, const Vector *);
 
 /*
  * Parses Vector content from the blob; vector type and dimensions must be filled already
 */
 int vectorParseSqliteBlob   (sqlite3_value *, Vector *, char **);
-int vectorF32ParseSqliteBlob(sqlite3_value *, Vector *, char **);
-int vectorF64ParseSqliteBlob(sqlite3_value *, Vector *, char **);
 
-void vectorInitStatic(Vector *, VectorType, const unsigned char *, size_t);
+void vectorF32DeserializeFromBlob(Vector *, const unsigned char *, size_t);
+void vectorF64DeserializeFromBlob(Vector *, const unsigned char *, size_t);
+
+void vectorInitStatic(Vector *, VectorType, VectorDims, void *);
 void vectorInitFromBlob(Vector *, const unsigned char *, size_t);
 void vectorF32InitFromBlob(Vector *, const unsigned char *, size_t);
 void vectorF64InitFromBlob(Vector *, const unsigned char *, size_t);
+
+void vectorConvert(const Vector *, Vector *);
 
 /* Detect type and dimension of vector provided with first parameter of sqlite3_value * type */
 int detectVectorParameters(sqlite3_value *, int, int *, int *, char **);
@@ -85410,10 +85412,10 @@ int nodeEdgesMetadataOffset(const DiskAnnIndex *pIndex);
 void nodeBinInit(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, u64 nRowid, Vector *pVector);
 void nodeBinVector(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot, Vector *pVector);
 u16 nodeBinEdges(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot);
-void nodeBinEdge(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot, int iEdge, u64 *pRowid, Vector *pVector);
+void nodeBinEdge(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot, int iEdge, u64 *pRowid, float *distance, Vector *pVector);
 int nodeBinEdgeFindIdx(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot, u64 nRowid);
 void nodeBinPruneEdges(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, int nPruned);
-void nodeBinReplaceEdge(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, int iReplace, u64 nRowid, Vector *pVector);
+void nodeBinReplaceEdge(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, int iReplace, u64 nRowid, float distance, Vector *pVector);
 void nodeBinDeleteEdge(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, int iDelete);
 void nodeBinDebug(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot);
 
@@ -85437,43 +85439,47 @@ typedef u8 MetricType;
 */
 
 /* format version which can help to upgrade vector on-disk format without breaking older version of the db */
-#define VECTOR_FORMAT_PARAM_ID         1
+#define VECTOR_FORMAT_PARAM_ID              1
 /*
- * 1 - initial version
+ * 1 - v1 version; node block format: [node meta] [node vector] [edge vectors] ... [ [u64 unused               ] [u64 edge rowid] ] ...
+ * 2 - v2 version; node block format: [node meta] [node vector] [edge vectors] ... [ [u32 unused] [f32 distance] [u64 edge rowid] ] ...
 */
-#define VECTOR_FORMAT_DEFAULT          1
+#define VECTOR_FORMAT_V1                    1
+#define VECTOR_FORMAT_DEFAULT               2
 
 /* type of the vector index */
-#define VECTOR_INDEX_TYPE_PARAM_ID     2
-#define VECTOR_INDEX_TYPE_DISKANN      1
+#define VECTOR_INDEX_TYPE_PARAM_ID          2
+#define VECTOR_INDEX_TYPE_DISKANN           1
 
 /* type of the underlying vector for the vector index */
-#define VECTOR_TYPE_PARAM_ID           3
+#define VECTOR_TYPE_PARAM_ID                3
 /* dimension of the underlying vector for the vector index */
-#define VECTOR_DIM_PARAM_ID            4
+#define VECTOR_DIM_PARAM_ID                 4
 
 /* metric type used for comparing two vectors */
-#define VECTOR_METRIC_TYPE_PARAM_ID    5
-#define VECTOR_METRIC_TYPE_COS         1
-#define VECTOR_METRIC_TYPE_L2          2
+#define VECTOR_METRIC_TYPE_PARAM_ID         5
+#define VECTOR_METRIC_TYPE_COS              1
+#define VECTOR_METRIC_TYPE_L2               2
 
 /* block size */
-#define VECTOR_BLOCK_SIZE_PARAM_ID     6
-#define VECTOR_BLOCK_SIZE_DEFAULT      128
+#define VECTOR_BLOCK_SIZE_PARAM_ID          6
+#define VECTOR_BLOCK_SIZE_DEFAULT           128
 
-#define VECTOR_PRUNING_ALPHA_PARAM_ID  7
-#define VECTOR_PRUNING_ALPHA_DEFAULT   1.2
+#define VECTOR_PRUNING_ALPHA_PARAM_ID       7
+#define VECTOR_PRUNING_ALPHA_DEFAULT        1.2
 
-#define VECTOR_INSERT_L_PARAM_ID       8
-#define VECTOR_INSERT_L_DEFAULT        70
+#define VECTOR_INSERT_L_PARAM_ID            8
+#define VECTOR_INSERT_L_DEFAULT             70
 
-#define VECTOR_SEARCH_L_PARAM_ID       9
-#define VECTOR_SEARCH_L_DEFAULT        200
+#define VECTOR_SEARCH_L_PARAM_ID            9
+#define VECTOR_SEARCH_L_DEFAULT             200
 
-#define VECTOR_MAX_NEIGHBORS_PARAM_ID  10
+#define VECTOR_MAX_NEIGHBORS_PARAM_ID       10
+
+#define VECTOR_COMPRESS_NEIGHBORS_PARAM_ID  11
 
 /* total amount of vector index parameters */
-#define VECTOR_PARAM_IDS_COUNT         9
+#define VECTOR_PARAM_IDS_COUNT              11
 
 /*
  * Vector index parameters are stored in simple binary format (1 byte tag + 8 byte u64 integer / f64 float)
@@ -85555,7 +85561,7 @@ int vectorOutRowsPut(VectorOutRows *, int, int, const u64 *, sqlite3_value *);
 void vectorOutRowsGet(sqlite3_context *, const VectorOutRows *, int, int);
 void vectorOutRowsFree(sqlite3 *, VectorOutRows *);
 
-int diskAnnCreateIndex(sqlite3 *, const char *, const char *, const VectorIdxKey *, VectorIdxParams *);
+int diskAnnCreateIndex(sqlite3 *, const char *, const char *, const VectorIdxKey *, VectorIdxParams *, const char **);
 int diskAnnClearIndex(sqlite3 *, const char *, const char *);
 int diskAnnDropIndex(sqlite3 *, const char *, const char *);
 int diskAnnOpenIndex(sqlite3 *, const char *, const char *, const VectorIdxParams *, DiskAnnIndex **);
@@ -210981,6 +210987,8 @@ size_t vectorDataSize(VectorType type, VectorDims dims){
       return dims * sizeof(float);
     case VECTOR_TYPE_FLOAT64:
       return dims * sizeof(double);
+    case VECTOR_TYPE_1BIT:
+      return (dims + 7) / 8;
     default:
       assert(0);
   }
@@ -211012,10 +211020,11 @@ Vector *vectorAlloc(VectorType type, VectorDims dims){
 ** Note that the vector object points to the blob so if
 ** you free the blob, the vector becomes invalid.
 **/
-void vectorInitStatic(Vector *pVector, VectorType type, const unsigned char *pBlob, size_t nBlobSize){
-  pVector->type = type;
+void vectorInitStatic(Vector *pVector, VectorType type, VectorDims dims, void *pBlob){
   pVector->flags = VECTOR_FLAGS_STATIC;
-  vectorInitFromBlob(pVector, pBlob, nBlobSize);
+  pVector->type = type;
+  pVector->dims = dims;
+  pVector->data = pBlob;
 }
 
 /*
@@ -211051,6 +211060,8 @@ float vectorDistanceCos(const Vector *pVector1, const Vector *pVector2){
       return vectorF32DistanceCos(pVector1, pVector2);
     case VECTOR_TYPE_FLOAT64:
       return vectorF64DistanceCos(pVector1, pVector2);
+    case VECTOR_TYPE_1BIT:
+      return vector1BitDistanceHamming(pVector1, pVector2);
     default:
       assert(0);
   }
@@ -211192,11 +211203,29 @@ int vectorParseSqliteBlob(
   Vector *pVector,
   char **pzErrMsg
 ){
+  const unsigned char *pBlob;
+  size_t nBlobSize;
+
+  assert( sqlite3_value_type(arg) == SQLITE_BLOB );
+
+  pBlob = sqlite3_value_blob(arg);
+  nBlobSize = sqlite3_value_bytes(arg);
+  if( nBlobSize % 2 == 1 ){
+    nBlobSize--;
+  }
+
+  if( nBlobSize < vectorDataSize(pVector->type, pVector->dims) ){
+    *pzErrMsg = sqlite3_mprintf("invalid vector: not enough bytes: type=%d, dims=%d, size=%ull", pVector->type, pVector->dims, nBlobSize);
+    return SQLITE_ERROR;
+  }
+
   switch (pVector->type) {
     case VECTOR_TYPE_FLOAT32:
-      return vectorF32ParseSqliteBlob(arg, pVector, pzErrMsg);
+      vectorF32DeserializeFromBlob(pVector, pBlob, nBlobSize);
+      return 0;
     case VECTOR_TYPE_FLOAT64:
-      return vectorF64ParseSqliteBlob(arg, pVector, pzErrMsg);
+      vectorF64DeserializeFromBlob(pVector, pBlob, nBlobSize);
+      return 0;
     default:
       assert(0);
   }
@@ -211303,6 +211332,9 @@ void vectorDump(const Vector *pVector){
     case VECTOR_TYPE_FLOAT64:
       vectorF64Dump(pVector);
       break;
+    case VECTOR_TYPE_1BIT:
+      vector1BitDump(pVector);
+      break;
     default:
       assert(0);
   }
@@ -211324,20 +211356,47 @@ void vectorMarshalToText(
   }
 }
 
-void vectorSerialize(
+void vectorSerializeWithType(
   sqlite3_context *context,
   const Vector *pVector
 ){
+  unsigned char *pBlob;
+  size_t nBlobSize, nDataSize;
+
+  assert( pVector->dims <= MAX_VECTOR_SZ );
+
+  nDataSize = vectorDataSize(pVector->type, pVector->dims);
+  nBlobSize = nDataSize;
+  if( pVector->type != VECTOR_TYPE_FLOAT32 ){
+    nBlobSize += (nBlobSize % 2 == 0 ? 1 : 2);
+  }
+
+  if( nBlobSize == 0 ){
+    sqlite3_result_zeroblob(context, 0);
+    return;
+  }
+
+  pBlob = sqlite3_malloc64(nBlobSize);
+  if( pBlob == NULL ){
+    sqlite3_result_error_nomem(context);
+    return;
+  }
+
+  if( pVector->type != VECTOR_TYPE_FLOAT32 ){
+    pBlob[nBlobSize - 1] = pVector->type;
+  }
+
   switch (pVector->type) {
     case VECTOR_TYPE_FLOAT32:
-      vectorF32Serialize(context, pVector);
+      vectorF32SerializeToBlob(pVector, pBlob, nDataSize);
       break;
     case VECTOR_TYPE_FLOAT64:
-      vectorF64Serialize(context, pVector);
+      vectorF64SerializeToBlob(pVector, pBlob, nDataSize);
       break;
     default:
       assert(0);
   }
+  sqlite3_result_blob(context, (char*)pBlob, nBlobSize, sqlite3_free);
 }
 
 size_t vectorSerializeToBlob(const Vector *pVector, unsigned char *pBlob, size_t nBlobSize){
@@ -211346,18 +211405,8 @@ size_t vectorSerializeToBlob(const Vector *pVector, unsigned char *pBlob, size_t
       return vectorF32SerializeToBlob(pVector, pBlob, nBlobSize);
     case VECTOR_TYPE_FLOAT64:
       return vectorF64SerializeToBlob(pVector, pBlob, nBlobSize);
-    default:
-      assert(0);
-  }
-  return 0;
-}
-
-size_t vectorDeserializeFromBlob(Vector *pVector, const unsigned char *pBlob, size_t nBlobSize){
-  switch (pVector->type) {
-    case VECTOR_TYPE_FLOAT32:
-      return vectorF32DeserializeFromBlob(pVector, pBlob, nBlobSize);
-    case VECTOR_TYPE_FLOAT64:
-      return vectorF64DeserializeFromBlob(pVector, pBlob, nBlobSize);
+    case VECTOR_TYPE_1BIT:
+      return vector1BitSerializeToBlob(pVector, pBlob, nBlobSize);
     default:
       assert(0);
   }
@@ -211374,6 +211423,29 @@ void vectorInitFromBlob(Vector *pVector, const unsigned char *pBlob, size_t nBlo
       break;
     default:
       assert(0);
+  }
+}
+
+void vectorConvert(const Vector *pFrom, Vector *pTo){
+  int i;
+  u8 *bitData;
+  float *floatData;
+
+  assert( pFrom->dims == pTo->dims );
+
+  if( pFrom->type == VECTOR_TYPE_FLOAT32 && pTo->type == VECTOR_TYPE_1BIT ){
+    floatData = pFrom->data;
+    bitData = pTo->data;
+    for(i = 0; i < pFrom->dims; i += 8){
+      bitData[i / 8] = 0;
+    }
+    for(i = 0; i < pFrom->dims; i++){
+      if( floatData[i] > 0 ){
+        bitData[i / 8] |= (1 << (i & 7));
+      }
+    }
+  }else{
+    assert(0);
   }
 }
 
@@ -211410,7 +211482,7 @@ static void vectorFuncHintedType(
     sqlite3_free(pzErrMsg);
     goto out_free_vec;
   }
-  vectorSerialize(context, pVector);
+  vectorSerializeWithType(context, pVector);
 out_free_vec:
   vectorFree(pVector);
 }
@@ -211557,6 +211629,135 @@ SQLITE_PRIVATE void sqlite3RegisterVectorFunctions(void){
 #endif /* !defined(SQLITE_OMIT_VECTOR) */
 
 /************** End of vector.c **********************************************/
+/************** Begin file vector1bit.c **************************************/
+/*
+** 2024-07-04
+**
+** Copyright 2024 the libSQL authors
+**
+** Permission is hereby granted, free of charge, to any person obtaining a copy of
+** this software and associated documentation files (the "Software"), to deal in
+** the Software without restriction, including without limitation the rights to
+** use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+** the Software, and to permit persons to whom the Software is furnished to do so,
+** subject to the following conditions:
+**
+** The above copyright notice and this permission notice shall be included in all
+** copies or substantial portions of the Software.
+**
+** THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+** IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+** FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+** COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+** IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+** CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+**
+******************************************************************************
+**
+** 1-bit vector format utilities.
+*/
+#ifndef SQLITE_OMIT_VECTOR
+/* #include "sqliteInt.h" */
+
+/* #include "vectorInt.h" */
+
+/* #include <math.h> */
+
+/**************************************************************************
+** Utility routines for debugging
+**************************************************************************/
+
+void vector1BitDump(const Vector *pVec){
+  u8 *elems = pVec->data;
+  unsigned i;
+
+  assert( pVec->type == VECTOR_TYPE_1BIT );
+
+  for(i = 0; i < pVec->dims; i++){
+    printf("%d ", ((elems[i / 8] >> (i & 7)) & 1) ? +1 : -1);
+  }
+  printf("\n");
+}
+
+/**************************************************************************
+** Utility routines for vector serialization and deserialization
+**************************************************************************/
+
+size_t vector1BitSerializeToBlob(
+  const Vector *pVector,
+  unsigned char *pBlob,
+  size_t nBlobSize
+){
+  u8 *elems = pVector->data;
+  u8 *pPtr = pBlob;
+  unsigned i;
+
+  assert( pVector->type == VECTOR_TYPE_1BIT );
+  assert( pVector->dims <= MAX_VECTOR_SZ );
+  assert( nBlobSize >= (pVector->dims + 7) / 8 );
+
+  for(i = 0; i < (pVector->dims + 7) / 8; i++){
+    pPtr[i] = elems[i];
+  }
+  return (pVector->dims + 7) / 8;
+}
+
+// [sum(map(int, bin(i)[2:])) for i in range(256)]
+static int BitsCount[256] = {
+  0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4,
+  1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+  1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+  2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+  1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+  2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+  2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+  3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+  1, 2, 2, 3, 2, 3, 3, 4, 2, 3, 3, 4, 3, 4, 4, 5,
+  2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+  2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+  3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+  2, 3, 3, 4, 3, 4, 4, 5, 3, 4, 4, 5, 4, 5, 5, 6,
+  3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+  3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
+  4, 5, 5, 6, 5, 6, 6, 7, 5, 6, 6, 7, 6, 7, 7, 8,
+};
+
+static inline int sqlite3PopCount32(u32 a){
+#if GCC_VERSION>=5004000 && !defined(__INTEL_COMPILER)
+  return __builtin_popcount(a);
+#else
+  return BitsCount[a >> 24] + BitsCount[(a >> 16) & 0xff] + BitsCount[(a >> 8) & 0xff] + BitsCount[a & 0xff];
+#endif
+}
+
+int vector1BitDistanceHamming(const Vector *v1, const Vector *v2){
+  int diff = 0;
+  u8 *e1U8 = v1->data;
+  u32 *e1U32 = v1->data;
+  u8 *e2U8 = v2->data;
+  u32 *e2U32 = v2->data;
+  int i, len8, len32, offset8;
+
+  assert( v1->dims == v2->dims );
+  assert( v1->type == VECTOR_TYPE_1BIT );
+  assert( v2->type == VECTOR_TYPE_1BIT );
+
+  len8 = (v1->dims + 7) / 8;
+  len32 = v1->dims / 32;
+  offset8 = len32 * 4;
+
+  for(i = 0; i < len32; i++){
+    diff += sqlite3PopCount32(e1U32[i] ^ e2U32[i]);
+  }
+  for(i = offset8; i < len8; i++){
+    diff += sqlite3PopCount32(e1U8[i] ^ e2U8[i]);
+  }
+  return diff;
+}
+
+#endif /* !defined(SQLITE_OMIT_VECTOR) */
+
+/************** End of vector1bit.c ******************************************/
 /************** Begin file vectordiskann.c ***********************************/
 /*
 ** 2024-03-23
@@ -211607,13 +211808,14 @@ SQLITE_PRIVATE void sqlite3RegisterVectorFunctions(void){
 **    diskAnnInsert()          Insert single new(!) vector in an opened index
 **    diskAnnDelete()          Delete row by key from an opened index
 */
+/* #include "vectorInt.h" */
 #ifndef SQLITE_OMIT_VECTOR
 
 /* #include "math.h" */
 /* #include "sqliteInt.h" */
 /* #include "vectorIndexInt.h" */
 
-#define SQLITE_VECTOR_TRACE
+// #define SQLITE_VECTOR_TRACE
 #if defined(SQLITE_DEBUG) && defined(SQLITE_VECTOR_TRACE)
 #define DiskAnnTrace(X) sqlite3DebugPrintf X;
 #else
@@ -211639,8 +211841,17 @@ SQLITE_PRIVATE void sqlite3RegisterVectorFunctions(void){
 #define VECTOR_NODE_METADATA_SIZE (sizeof(u64) + sizeof(u16))
 #define VECTOR_EDGE_METADATA_SIZE (sizeof(u64) + sizeof(u64))
 
+typedef struct VectorPair VectorPair;
 typedef struct DiskAnnSearchCtx DiskAnnSearchCtx;
 typedef struct DiskAnnNode DiskAnnNode;
+
+// VectorPair represents single vector where pNode is an exact representation and pEdge - compressed representation (always NULL if pNodeType == pEdgeType)
+struct VectorPair {
+  int nodeType;
+  int edgeType;
+  Vector *pNode;
+  Vector *pEdge;
+};
 
 // DiskAnnNode represents single node in the DiskAnn graph
 struct DiskAnnNode {
@@ -211657,14 +211868,18 @@ struct DiskAnnNode {
  * so caller which puts nodes in the context can forget about resource managmenet (context will take care of this)
 */
 struct DiskAnnSearchCtx {
-  const Vector *pQuery;       /* initial query vector; user query for SELECT and row vector for INSERT */
-  DiskAnnNode **aCandidates;  /* array of candidates ordered by distance to the query (ascending) */
-  double *aDistances;         /* array of distances to the query vector */
-  unsigned int nCandidates;   /* current size of aCandidates/aDistances arrays */
-  unsigned int maxCandidates; /* max size of aCandidates/aDistances arrays */
-  DiskAnnNode *visitedList;   /* list of all visited candidates (so, candidates from aCandidates array either got replaced or moved to the visited list) */
-  unsigned int nUnvisited;    /* amount of unvisited candidates in the aCadidates array */
-  int blobMode;               /* DISKANN_BLOB_READONLY if we wont modify node blobs; DISKANN_BLOB_WRITABLE - otherwise */
+  VectorPair query;             /* initial query vector; user query for SELECT and row vector for INSERT */
+  DiskAnnNode **aCandidates;    /* array of unvisited candidates ordered by distance (possibly approximate) to the query (ascending) */
+  float *aDistances;            /* array of distances (possible approximate) to the query vector */
+  unsigned int nCandidates;     /* current size of aCandidates/aDistances arrays */
+  unsigned int maxCandidates;   /* max size of aCandidates/aDistances arrays */
+  DiskAnnNode **aTopCandidates; /* top candidates with exact distance calculated */
+  float *aTopDistances;         /* top candidates exact distances */
+  int nTopCandidates;           /* current size of aTopCandidates/aTopDistances arrays */
+  int maxTopCandidates;         /* max size of aTopCandidates/aTopDistances arrays */
+  DiskAnnNode *visitedList;     /* list of all visited candidates (so, candidates from aCandidates array either got replaced or moved to the visited list) */
+  unsigned int nUnvisited;      /* amount of unvisited candidates in the aCadidates array */
+  int blobMode;                 /* DISKANN_BLOB_READONLY if we wont modify node blobs; DISKANN_BLOB_WRITABLE - otherwise */
 };
 
 /**************************************************************************
@@ -211673,6 +211888,10 @@ struct DiskAnnSearchCtx {
 
 static inline u16 readLE16(const unsigned char *p){
   return (u16)p[0] | (u16)p[1] << 8;
+}
+
+static inline u32 readLE32(const unsigned char *p){
+  return (u32)p[0] | (u32)p[1] << 8 | (u32)p[2] << 16 | (u32)p[3] << 24;
 }
 
 static inline u64 readLE64(const unsigned char *p){
@@ -211689,6 +211908,13 @@ static inline u64 readLE64(const unsigned char *p){
 static inline void writeLE16(unsigned char *p, u16 v){
   p[0] = v;
   p[1] = v >> 8;
+}
+
+static inline void writeLE32(unsigned char *p, u32 v){
+  p[0] = v;
+  p[1] = v >> 8;
+  p[2] = v >> 16;
+  p[3] = v >> 24;
 }
 
 static inline void writeLE64(unsigned char *p, u64 v){
@@ -211870,7 +212096,7 @@ void nodeBinInit(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, u64 nRowid, Ve
 void nodeBinVector(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot, Vector *pVector) {
   assert( VECTOR_NODE_METADATA_SIZE + pIndex->nNodeVectorSize <= pBlobSpot->nBufferSize );
 
-  vectorInitStatic(pVector, pIndex->nNodeVectorType, pBlobSpot->pBuffer + VECTOR_NODE_METADATA_SIZE, pIndex->nNodeVectorSize);
+  vectorInitStatic(pVector, pIndex->nNodeVectorType, pIndex->nVectorDims, pBlobSpot->pBuffer + VECTOR_NODE_METADATA_SIZE);
 }
 
 u16 nodeBinEdges(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot) {
@@ -211879,20 +212105,25 @@ u16 nodeBinEdges(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot) {
   return readLE16(pBlobSpot->pBuffer + sizeof(u64));
 }
 
-void nodeBinEdge(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot, int iEdge, u64 *pRowid, Vector *pVector) {
+void nodeBinEdge(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot, int iEdge, u64 *pRowid, float *pDistance, Vector *pVector) {
+  u32 distance;
   int offset = nodeEdgesMetadataOffset(pIndex);
 
   if( pRowid != NULL ){
     assert( offset + (iEdge + 1) * VECTOR_EDGE_METADATA_SIZE <= pBlobSpot->nBufferSize );
     *pRowid = readLE64(pBlobSpot->pBuffer + offset + iEdge * VECTOR_EDGE_METADATA_SIZE + sizeof(u64));
   }
+  if( pIndex->nFormatVersion != VECTOR_FORMAT_V1 && pDistance != NULL ){
+    distance = readLE32(pBlobSpot->pBuffer + offset + iEdge * VECTOR_EDGE_METADATA_SIZE + sizeof(u32));
+    *pDistance = *((float*)&distance);
+  }
   if( pVector != NULL ){
     assert( VECTOR_NODE_METADATA_SIZE + pIndex->nNodeVectorSize + iEdge * pIndex->nEdgeVectorSize < offset );
     vectorInitStatic(
       pVector,
       pIndex->nEdgeVectorType,
-      pBlobSpot->pBuffer + VECTOR_NODE_METADATA_SIZE + pIndex->nNodeVectorSize + iEdge * pIndex->nNodeVectorSize,
-      pIndex->nEdgeVectorSize
+      pIndex->nVectorDims,
+      pBlobSpot->pBuffer + VECTOR_NODE_METADATA_SIZE + pIndex->nNodeVectorSize + iEdge * pIndex->nEdgeVectorSize
     );
   }
 }
@@ -211902,7 +212133,7 @@ int nodeBinEdgeFindIdx(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot, u6
   // todo: if edges will be sorted by identifiers we can use binary search here (although speed up will be visible only on pretty loaded nodes: >128 edges)
   for(i = 0; i < nEdges; i++){
     u64 edgeId;
-    nodeBinEdge(pIndex, pBlobSpot, i, &edgeId, NULL);
+    nodeBinEdge(pIndex, pBlobSpot, i, &edgeId, NULL, NULL);
     if( edgeId == nRowid ){
       return i;
     }
@@ -211917,7 +212148,7 @@ void nodeBinPruneEdges(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, int nPru
 }
 
 // replace edge at position iReplace or add new one if iReplace == nEdges
-void nodeBinReplaceEdge(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, int iReplace, u64 nRowid, Vector *pVector) {
+void nodeBinReplaceEdge(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, int iReplace, u64 nRowid, float distance, Vector *pVector) {
   int nMaxEdges = nodeEdgesMaxCount(pIndex);
   int nEdges = nodeBinEdges(pIndex, pBlobSpot);
   int edgeVectorOffset, edgeMetaOffset, itemsToMove;
@@ -211936,6 +212167,7 @@ void nodeBinReplaceEdge(const DiskAnnIndex *pIndex, BlobSpot *pBlobSpot, int iRe
   assert( edgeMetaOffset + VECTOR_EDGE_METADATA_SIZE <= pBlobSpot->nBufferSize );
 
   vectorSerializeToBlob(pVector, pBlobSpot->pBuffer + edgeVectorOffset, pIndex->nEdgeVectorSize);
+  writeLE32(pBlobSpot->pBuffer + edgeMetaOffset + sizeof(u32), *((u32*)&distance));
   writeLE64(pBlobSpot->pBuffer + edgeMetaOffset + sizeof(u64), nRowid);
 
   writeLE16(pBlobSpot->pBuffer + sizeof(u64), nEdges);
@@ -211970,6 +212202,7 @@ void nodeBinDebug(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot) {
 #if defined(SQLITE_DEBUG) && defined(SQLITE_VECTOR_TRACE)
   int nEdges, nMaxEdges, i;
   u64 nRowid;
+  float distance = 0;
   Vector vector;
 
   nEdges = nodeBinEdges(pIndex, pBlobSpot);
@@ -211980,8 +212213,8 @@ void nodeBinDebug(const DiskAnnIndex *pIndex, const BlobSpot *pBlobSpot) {
   DiskAnnTrace(("  nEdges=%d, nMaxEdges=%d, vector=", nEdges, nMaxEdges));
   vectorDump(&vector);
   for(i = 0; i < nEdges; i++){
-    nodeBinEdge(pIndex, pBlobSpot, i, &nRowid, &vector);
-    DiskAnnTrace(("  to=%lld, vector=", nRowid, nRowid));
+    nodeBinEdge(pIndex, pBlobSpot, i, &nRowid, &distance, &vector);
+    DiskAnnTrace(("  to=%lld, distance=%f, vector=", nRowid, distance));
     vectorDump(&vector);
   }
 #endif
@@ -211996,10 +212229,11 @@ int diskAnnCreateIndex(
   const char *zDbSName,
   const char *zIdxName,
   const VectorIdxKey *pKey,
-  VectorIdxParams *pParams
+  VectorIdxParams *pParams,
+  const char **pzErrMsg
 ){
   int rc;
-  int type, dims;
+  int type, dims, metric, neighbours;
   u64 maxNeighborsParam, blockSizeBytes;
   char *zSql;
   char columnSqlDefs[VECTOR_INDEX_SQL_RENDER_LIMIT]; // definition of columns (e.g. index_key INTEGER BINARY, index_key1 TEXT, ...)
@@ -212023,24 +212257,36 @@ int diskAnnCreateIndex(
   }
   assert( 0 < dims && dims <= MAX_VECTOR_SZ );
 
+  metric = vectorIdxParamsGetU64(pParams, VECTOR_METRIC_TYPE_PARAM_ID);
+  if( metric == 0 ){
+    metric = VECTOR_METRIC_TYPE_COS;
+    if( vectorIdxParamsPutU64(pParams, VECTOR_METRIC_TYPE_PARAM_ID, metric) != 0 ){
+      return SQLITE_ERROR;
+    }
+  }
+  neighbours = vectorIdxParamsGetU64(pParams, VECTOR_COMPRESS_NEIGHBORS_PARAM_ID);
+  if( neighbours == VECTOR_TYPE_1BIT && metric != VECTOR_METRIC_TYPE_COS ){
+    *pzErrMsg = "1-bit compression available only for cosine metric";
+    return SQLITE_ERROR;
+  }
+  if( neighbours == 0 ){
+    neighbours = type;
+  }
+
   maxNeighborsParam = vectorIdxParamsGetU64(pParams, VECTOR_MAX_NEIGHBORS_PARAM_ID);
   if( maxNeighborsParam == 0 ){
     // 3 D**(1/2) gives good recall values (90%+)
     // we also want to keep disk overhead at moderate level - 50x of the disk size increase is the current upper bound
-    maxNeighborsParam = MIN(3 * ((int)(sqrt(dims)) + 1), (50 * nodeOverhead(vectorDataSize(type, dims))) / nodeEdgeOverhead(vectorDataSize(type, dims)) + 1);
+    maxNeighborsParam = MIN(3 * ((int)(sqrt(dims)) + 1), (50 * nodeOverhead(vectorDataSize(type, dims))) / nodeEdgeOverhead(vectorDataSize(neighbours, dims)) + 1);
   }
-  blockSizeBytes = nodeOverhead(vectorDataSize(type, dims)) + maxNeighborsParam * (u64)nodeEdgeOverhead(vectorDataSize(type, dims));
+  blockSizeBytes = nodeOverhead(vectorDataSize(type, dims)) + maxNeighborsParam * (u64)nodeEdgeOverhead(vectorDataSize(neighbours, dims));
   if( blockSizeBytes > DISKANN_MAX_BLOCK_SZ ){
     return SQLITE_ERROR;
   }
   if( vectorIdxParamsPutU64(pParams, VECTOR_BLOCK_SIZE_PARAM_ID, MAX(256, blockSizeBytes))  != 0 ){
     return SQLITE_ERROR;
   }
-  if( vectorIdxParamsGetU64(pParams, VECTOR_METRIC_TYPE_PARAM_ID) == 0 ){
-    if( vectorIdxParamsPutU64(pParams, VECTOR_METRIC_TYPE_PARAM_ID, VECTOR_METRIC_TYPE_COS) != 0 ){
-      return SQLITE_ERROR;
-    }
-  }
+
   if( vectorIdxParamsGetF64(pParams, VECTOR_PRUNING_ALPHA_PARAM_ID) == 0 ){
     if( vectorIdxParamsPutF64(pParams, VECTOR_PRUNING_ALPHA_PARAM_ID, VECTOR_PRUNING_ALPHA_DEFAULT) != 0 ){
       return SQLITE_ERROR;
@@ -212356,6 +212602,83 @@ out:
 }
 
 /**************************************************************************
+** Generic utilities
+**************************************************************************/
+
+int initVectorPair(int nodeType, int edgeType, int dims, VectorPair *pPair){
+  pPair->nodeType = nodeType;
+  pPair->edgeType = edgeType;
+  pPair->pNode = NULL;
+  pPair->pEdge = NULL;
+  if( pPair->nodeType == pPair->edgeType ){
+    return 0;
+  }
+  pPair->pEdge = vectorAlloc(edgeType, dims);
+  if( pPair->pEdge == NULL ){
+    return SQLITE_NOMEM_BKPT;
+  }
+  return 0;
+}
+
+void loadVectorPair(VectorPair *pPair, const Vector *pVector){
+  pPair->pNode = (Vector*)pVector;
+  if( pPair->edgeType != pPair->nodeType ){
+    vectorConvert(pPair->pNode, pPair->pEdge);
+  }else{
+    pPair->pEdge = pPair->pNode;
+  }
+}
+
+void deinitVectorPair(VectorPair *pPair) {
+  if( pPair->pEdge != NULL && pPair->pNode != pPair->pEdge ){
+    vectorFree(pPair->pEdge);
+  }
+}
+
+int distanceBufferInsertIdx(const float *aDistances, int nSize, int nMaxSize, float distance){
+  int i;
+#ifdef SQLITE_DEBUG
+  for(i = 0; i < nSize - 1; i++){
+    assert(aDistances[i] <= aDistances[i + 1]);
+  }
+#endif
+  for(i = 0; i < nSize; i++){
+    if( distance < aDistances[i] ){
+      return i;
+    }
+  }
+  return nSize < nMaxSize ? nSize : -1;
+}
+
+void bufferInsert(void *aBuffer, int nSize, int nMaxSize, int iInsert, int nItemSize, const void *pItem, void *pLast) {
+  int itemsToMove;
+
+  assert( nMaxSize > 0 && nItemSize > 0 );
+  assert( nSize <= nMaxSize );
+  assert( 0 <= iInsert && iInsert <= nSize && iInsert < nMaxSize );
+
+  if( nSize == nMaxSize ){
+    if( pLast != NULL ){
+      memcpy(pLast, aBuffer + (nSize - 1) * nItemSize, nItemSize);
+    }
+    nSize--;
+  }
+  itemsToMove = nSize - iInsert;
+  memmove(aBuffer + (iInsert + 1) * nItemSize, aBuffer + iInsert * nItemSize, itemsToMove * nItemSize);
+  memcpy(aBuffer + iInsert * nItemSize, pItem, nItemSize);
+}
+
+void bufferDelete(void *aBuffer, int nSize, int iDelete, int nItemSize) {
+  int itemsToMove;
+
+  assert( nItemSize > 0 );
+  assert( 0 <= iDelete && iDelete < nSize );
+
+  itemsToMove = nSize - iDelete - 1;
+  memmove(aBuffer + iDelete * nItemSize, aBuffer + (iDelete + 1) * nItemSize, itemsToMove * nItemSize);
+}
+
+/**************************************************************************
 ** DiskANN internals
 **************************************************************************/
 
@@ -212391,16 +212714,24 @@ static void diskAnnNodeFree(DiskAnnNode *pNode){
   sqlite3_free(pNode);
 }
 
-static int diskAnnSearchCtxInit(DiskAnnSearchCtx *pCtx, const Vector* pQuery, unsigned int maxCandidates, int blobMode){
-  pCtx->pQuery = pQuery;
+static int diskAnnSearchCtxInit(const DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, const Vector* pQuery, int maxCandidates, int topCandidates, int blobMode){
   pCtx->aDistances = sqlite3_malloc(maxCandidates * sizeof(double));
   pCtx->aCandidates = sqlite3_malloc(maxCandidates * sizeof(DiskAnnNode*));
   pCtx->nCandidates = 0;
   pCtx->maxCandidates = maxCandidates;
+  pCtx->aTopDistances = sqlite3_malloc(topCandidates * sizeof(double));
+  pCtx->aTopCandidates = sqlite3_malloc(topCandidates * sizeof(DiskAnnNode*));
+  pCtx->nTopCandidates = 0;
+  pCtx->maxTopCandidates = topCandidates;
   pCtx->visitedList = NULL;
   pCtx->nUnvisited = 0;
   pCtx->blobMode = blobMode;
-  if( pCtx->aDistances == NULL || pCtx->aCandidates == NULL ){
+  if( initVectorPair(pIndex->nNodeVectorType, pIndex->nEdgeVectorType, pIndex->nVectorDims, &pCtx->query) != 0 ){
+    goto out_oom;
+  }
+  loadVectorPair(&pCtx->query, pQuery);
+
+  if( pCtx->aDistances == NULL || pCtx->aCandidates == NULL || pCtx->aTopDistances == NULL || pCtx->aTopCandidates == NULL ){
     goto out_oom;
   }
   return SQLITE_OK;
@@ -212410,6 +212741,12 @@ out_oom:
   }
   if( pCtx->aCandidates != NULL ){
     sqlite3_free(pCtx->aCandidates);
+  }
+  if( pCtx->aTopDistances != NULL ){
+    sqlite3_free(pCtx->aTopDistances);
+  }
+  if( pCtx->aTopCandidates != NULL ){
+    sqlite3_free(pCtx->aTopCandidates);
   }
   return SQLITE_NOMEM_BKPT;
 }
@@ -212434,6 +212771,9 @@ static void diskAnnSearchCtxDeinit(DiskAnnSearchCtx *pCtx){
   }
   sqlite3_free(pCtx->aCandidates);
   sqlite3_free(pCtx->aDistances);
+  sqlite3_free(pCtx->aTopCandidates);
+  sqlite3_free(pCtx->aTopDistances);
+  deinitVectorPair(&pCtx->query);
 }
 
 // check if we visited this node earlier
@@ -212475,7 +212815,9 @@ static int diskAnnSearchCtxShouldAddCandidate(const DiskAnnIndex *pIndex, const 
 }
 
 // mark node as visited and put it in the head of visitedList
-static void diskAnnSearchCtxMarkVisited(DiskAnnSearchCtx *pCtx, DiskAnnNode *pNode){
+static void diskAnnSearchCtxMarkVisited(DiskAnnSearchCtx *pCtx, DiskAnnNode *pNode, float distance){
+  int iInsert;
+
   assert( pCtx->nUnvisited > 0 );
   assert( pNode->visited == 0 );
 
@@ -212484,56 +212826,51 @@ static void diskAnnSearchCtxMarkVisited(DiskAnnSearchCtx *pCtx, DiskAnnNode *pNo
 
   pNode->pNext = pCtx->visitedList;
   pCtx->visitedList = pNode;
+
+  iInsert = distanceBufferInsertIdx(pCtx->aTopDistances, pCtx->nTopCandidates, pCtx->maxTopCandidates, distance);
+  if( iInsert < 0 ){
+    return;
+  }
+  bufferInsert(pCtx->aTopCandidates, pCtx->nTopCandidates, pCtx->maxTopCandidates, iInsert, sizeof(DiskAnnNode*), &pNode, NULL);
+  bufferInsert(pCtx->aTopDistances, pCtx->nTopCandidates, pCtx->maxTopCandidates, iInsert, sizeof(float), &distance, NULL);
+  pCtx->nTopCandidates = MIN(pCtx->nTopCandidates + 1, pCtx->maxTopCandidates);
 }
 
 static int diskAnnSearchCtxHasUnvisited(const DiskAnnSearchCtx *pCtx){
   return pCtx->nUnvisited > 0;
 }
 
-static DiskAnnNode* diskAnnSearchCtxGetCandidate(DiskAnnSearchCtx *pCtx, int i){
+static void diskAnnSearchCtxGetCandidate(DiskAnnSearchCtx *pCtx, int i, DiskAnnNode **ppNode, float *pDistance){
   assert( 0 <= i && i < pCtx->nCandidates );
-  return pCtx->aCandidates[i];
+  *ppNode = pCtx->aCandidates[i];
+  *pDistance = pCtx->aDistances[i];
 }
 
 static void diskAnnSearchCtxDeleteCandidate(DiskAnnSearchCtx *pCtx, int iDelete){
   int i;
-  assert( 0 <= iDelete && iDelete < pCtx->nCandidates );
   assert( pCtx->nUnvisited > 0 );
   assert( !pCtx->aCandidates[iDelete]->visited );
   assert( pCtx->aCandidates[iDelete]->pBlobSpot == NULL );
 
   diskAnnNodeFree(pCtx->aCandidates[iDelete]);
+  bufferDelete(pCtx->aCandidates, pCtx->nCandidates, iDelete, sizeof(DiskAnnNode*));
+  bufferDelete(pCtx->aDistances, pCtx->nCandidates, iDelete, sizeof(float));
 
-  for(i = iDelete + 1; i < pCtx->nCandidates; i++){
-    pCtx->aCandidates[i - 1] = pCtx->aCandidates[i];
-    pCtx->aDistances[i - 1] = pCtx->aDistances[i];
-  }
   pCtx->nCandidates--;
   pCtx->nUnvisited--;
 }
 
-static void diskAnnSearchCtxInsertCandidate(DiskAnnSearchCtx *pCtx, int iInsert, DiskAnnNode* pCandidate, float candidateDist){
-  int i;
-  assert( 0 <= iInsert && iInsert <= pCtx->nCandidates && iInsert < pCtx->maxCandidates );
-  if( pCtx->nCandidates < pCtx->maxCandidates ){
-    pCtx->nCandidates++;
-  } else {
-    DiskAnnNode *pLast = pCtx->aCandidates[pCtx->nCandidates - 1];
-    if( !pLast->visited ){
-      // since pLast is not visited it should have uninitialized pBlobSpot - so it's safe to completely free the node
-      assert( pLast->pBlobSpot == NULL );
-      pCtx->nUnvisited--;
-      diskAnnNodeFree(pLast);
-    }
+static void diskAnnSearchCtxInsertCandidate(DiskAnnSearchCtx *pCtx, int iInsert, DiskAnnNode* pCandidate, float distance){
+  DiskAnnNode *pLast = NULL;
+  bufferInsert(pCtx->aCandidates, pCtx->nCandidates, pCtx->maxCandidates, iInsert, sizeof(DiskAnnNode*), &pCandidate, &pLast);
+  bufferInsert(pCtx->aDistances, pCtx->nCandidates, pCtx->maxCandidates, iInsert, sizeof(float), &distance, NULL);
+  pCtx->nCandidates = MIN(pCtx->nCandidates + 1, pCtx->maxCandidates);
+  if( pLast != NULL && !pLast->visited ){
+    // since pLast is not visited it should have uninitialized pBlobSpot - so it's safe to completely free the node
+    assert( pLast->pBlobSpot == NULL );
+    pCtx->nUnvisited--;
+    diskAnnNodeFree(pLast);
   }
-  // Shift the candidates to the right to make space for the new one.
-  for(i = pCtx->nCandidates - 1; i > iInsert; i--){
-    pCtx->aCandidates[i] = pCtx->aCandidates[i - 1];
-    pCtx->aDistances[i] = pCtx->aDistances[i - 1];
-  }
-  // Insert the new candidate.
-  pCtx->aCandidates[iInsert] = pCandidate;
-  pCtx->aDistances[iInsert] = candidateDist;
   pCtx->nUnvisited++;
 }
 
@@ -212563,7 +212900,14 @@ static int diskAnnSearchCtxFindClosestCandidateIdx(const DiskAnnSearchCtx *pCtx)
 // return position for new edge(C) which will replace previous edge on that position or -1 if we should ignore it
 // we also check that no current edge(B) will "prune" new vertex: i.e. dist(B, C) >= (means worse than) alpha * dist(node, C) for all current edges
 // if any edge(B) will "prune" new edge(C) we will ignore it (return -1)
-static int diskAnnReplaceEdgeIdx(const DiskAnnIndex *pIndex, BlobSpot *pNodeBlob, u64 newRowid, const Vector *pNewVector) {
+static int diskAnnReplaceEdgeIdx(
+  const DiskAnnIndex *pIndex,
+  BlobSpot *pNodeBlob,
+  u64 newRowid,
+  VectorPair *pNewVector,
+  VectorPair *pPlaceholder,
+  float *pNodeToNew
+) {
   int i, nEdges, nMaxEdges, iReplace = -1;
   Vector nodeVector, edgeVector;
   float nodeToNew, nodeToReplace;
@@ -212571,20 +212915,27 @@ static int diskAnnReplaceEdgeIdx(const DiskAnnIndex *pIndex, BlobSpot *pNodeBlob
   nEdges = nodeBinEdges(pIndex, pNodeBlob);
   nMaxEdges = nodeEdgesMaxCount(pIndex);
   nodeBinVector(pIndex, pNodeBlob, &nodeVector);
-  nodeToNew = diskAnnVectorDistance(pIndex, &nodeVector, pNewVector);
+  loadVectorPair(pPlaceholder, &nodeVector);
+
+  // we need to evaluate potentially approximate distance here in order to correctly compare it with edge distances
+  nodeToNew = diskAnnVectorDistance(pIndex, pPlaceholder->pEdge, pNewVector->pEdge);
+  *pNodeToNew = nodeToNew;
 
   for(i = nEdges - 1; i >= 0; i--){
     u64 edgeRowid;
     float edgeToNew, nodeToEdge;
 
-    nodeBinEdge(pIndex, pNodeBlob, i, &edgeRowid, &edgeVector);
+    nodeBinEdge(pIndex, pNodeBlob, i, &edgeRowid, &nodeToEdge, &edgeVector);
     if( edgeRowid == newRowid ){
       // deletes can leave "zombie" edges in the graph and we must override them and not store duplicate edges in the node
       return i;
     }
 
-    edgeToNew = diskAnnVectorDistance(pIndex, &edgeVector, pNewVector);
-    nodeToEdge = diskAnnVectorDistance(pIndex, &nodeVector, &edgeVector);
+    if( pIndex->nFormatVersion == VECTOR_FORMAT_V1 ){
+      nodeToEdge = diskAnnVectorDistance(pIndex, pPlaceholder->pEdge, &edgeVector);
+    }
+
+    edgeToNew = diskAnnVectorDistance(pIndex, &edgeVector, pNewVector->pEdge);
     if( nodeToNew > pIndex->pruningAlpha * edgeToNew ){
       return -1;
     }
@@ -212602,12 +212953,14 @@ static int diskAnnReplaceEdgeIdx(const DiskAnnIndex *pIndex, BlobSpot *pNodeBlob
 // prune edges after we inserted new edge at position iInserted
 // we only need to check for edges which will be pruned by new vertex
 // no need to check for other pairs as we checked them on previous insertions
-static void diskAnnPruneEdges(const DiskAnnIndex *pIndex, BlobSpot *pNodeBlob, int iInserted) {
+static void diskAnnPruneEdges(const DiskAnnIndex *pIndex, BlobSpot *pNodeBlob, int iInserted, VectorPair *pPlaceholder) {
   int i, s, nEdges;
-  Vector nodeVector, hintVector;
+  Vector nodeVector, hintEdgeVector;
   u64 hintRowid;
 
   nodeBinVector(pIndex, pNodeBlob, &nodeVector);
+  loadVectorPair(pPlaceholder, &nodeVector);
+
   nEdges = nodeBinEdges(pIndex, pNodeBlob);
 
   assert( 0 <= iInserted && iInserted < nEdges );
@@ -212617,7 +212970,7 @@ static void diskAnnPruneEdges(const DiskAnnIndex *pIndex, BlobSpot *pNodeBlob, i
   nodeBinDebug(pIndex, pNodeBlob);
 #endif
 
-  nodeBinEdge(pIndex, pNodeBlob, iInserted, &hintRowid, &hintVector);
+  nodeBinEdge(pIndex, pNodeBlob, iInserted, &hintRowid, NULL, &hintEdgeVector);
 
   // remove edges which is no longer interesting due to the addition of iInserted
   i = 0;
@@ -212625,14 +212978,17 @@ static void diskAnnPruneEdges(const DiskAnnIndex *pIndex, BlobSpot *pNodeBlob, i
     Vector edgeVector;
     float nodeToEdge, hintToEdge;
     u64 edgeRowid;
-    nodeBinEdge(pIndex, pNodeBlob, i, &edgeRowid, &edgeVector);
+    nodeBinEdge(pIndex, pNodeBlob, i, &edgeRowid, &nodeToEdge, &edgeVector);
 
     if( hintRowid == edgeRowid ){
       i++;
       continue;
     }
-    nodeToEdge = diskAnnVectorDistance(pIndex, &nodeVector, &edgeVector);
-    hintToEdge = diskAnnVectorDistance(pIndex, &hintVector, &edgeVector);
+    if( pIndex->nFormatVersion == VECTOR_FORMAT_V1 ){
+      nodeToEdge = diskAnnVectorDistance(pIndex, pPlaceholder->pEdge, &edgeVector);
+    }
+
+    hintToEdge = diskAnnVectorDistance(pIndex, &hintEdgeVector, &edgeVector);
     if( nodeToEdge > pIndex->pruningAlpha * hintToEdge ){
       nodeBinDeleteEdge(pIndex, pNodeBlob, i);
       nEdges--;
@@ -212681,7 +213037,7 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
   }
 
   nodeBinVector(pIndex, start->pBlobSpot, &startVector);
-  startDistance = diskAnnVectorDistance(pIndex, pCtx->pQuery, &startVector);
+  startDistance = diskAnnVectorDistance(pIndex, pCtx->query.pNode, &startVector);
 
   if( pCtx->blobMode == DISKANN_BLOB_READONLY ){
     assert( start->pBlobSpot != NULL );
@@ -212698,8 +213054,9 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
     Vector vCandidate;
     DiskAnnNode *pCandidate;
     BlobSpot *pCandidateBlob;
+    float distance;
     int iCandidate = diskAnnSearchCtxFindClosestCandidateIdx(pCtx);
-    pCandidate = diskAnnSearchCtxGetCandidate(pCtx, iCandidate);
+    diskAnnSearchCtxGetCandidate(pCtx, iCandidate, &pCandidate, &distance);
 
     rc = SQLITE_OK;
     if( pReusableBlobSpot != NULL ){
@@ -212727,12 +213084,17 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
       goto out;
     }
 
-    diskAnnSearchCtxMarkVisited(pCtx, pCandidate);
-
     nVisited += 1;
     DiskAnnTrace(("visiting candidate(%d): id=%lld\n", nVisited, pCandidate->nRowid));
     nodeBinVector(pIndex, pCandidateBlob, &vCandidate);
     nEdges = nodeBinEdges(pIndex, pCandidateBlob);
+
+    // if pNodeQuery != pEdgeQuery then distance from aDistances is approximate and we must recalculate it
+    if( pCtx->query.pNode != pCtx->query.pEdge ){
+      distance = diskAnnVectorDistance(pIndex, &vCandidate, pCtx->query.pNode);
+    }
+
+    diskAnnSearchCtxMarkVisited(pCtx, pCandidate, distance);
 
     for(i = 0; i < nEdges; i++){
       u64 edgeRowid;
@@ -212740,12 +213102,12 @@ static int diskAnnSearchInternal(DiskAnnIndex *pIndex, DiskAnnSearchCtx *pCtx, u
       float edgeDistance;
       int iInsert;
       DiskAnnNode *pNewCandidate;
-      nodeBinEdge(pIndex, pCandidateBlob, i, &edgeRowid, &edgeVector);
+      nodeBinEdge(pIndex, pCandidateBlob, i, &edgeRowid, NULL, &edgeVector);
       if( diskAnnSearchCtxIsVisited(pCtx, edgeRowid) || diskAnnSearchCtxHasCandidate(pCtx, edgeRowid) ){
         continue;
       }
 
-      edgeDistance = diskAnnVectorDistance(pIndex, pCtx->pQuery, &edgeVector);
+      edgeDistance = diskAnnVectorDistance(pIndex, pCtx->query.pEdge, &edgeVector);
       iInsert = diskAnnSearchCtxShouldAddCandidate(pIndex, pCtx, edgeDistance);
       if( iInsert < 0 ){
         continue;
@@ -212822,7 +213184,7 @@ int diskAnnSearch(
     *pzErrMsg = sqlite3_mprintf("vector index(search): failed to select start node for search");
     return rc;
   }
-  rc = diskAnnSearchCtxInit(&ctx, pVector, pIndex->searchL, DISKANN_BLOB_READONLY);
+  rc = diskAnnSearchCtxInit(pIndex, &ctx, pVector, pIndex->searchL, k, DISKANN_BLOB_READONLY);
   if( rc != SQLITE_OK ){
     *pzErrMsg = sqlite3_mprintf("vector index(search): failed to initialize search context");
     goto out;
@@ -212831,7 +213193,7 @@ int diskAnnSearch(
   if( rc != SQLITE_OK ){
     goto out;
   }
-  nOutRows = MIN(k, ctx.nCandidates);
+  nOutRows = MIN(k, ctx.nTopCandidates);
   rc = vectorOutRowsAlloc(pIndex->db, pRows, nOutRows, pKey->nKeyColumns, vectorIdxKeyRowidLike(pKey));
   if( rc != SQLITE_OK ){
     *pzErrMsg = sqlite3_mprintf("vector index(search): failed to allocate output rows");
@@ -212839,9 +213201,9 @@ int diskAnnSearch(
   }
   for(i = 0; i < nOutRows; i++){
     if( pRows->aIntValues != NULL ){
-      rc = vectorOutRowsPut(pRows, i, 0, &ctx.aCandidates[i]->nRowid, NULL);
+      rc = vectorOutRowsPut(pRows, i, 0, &ctx.aTopCandidates[i]->nRowid, NULL);
     }else{
-      rc = diskAnnGetShadowRowKeys(pIndex, ctx.aCandidates[i]->nRowid, pKey, pRows, i);
+      rc = diskAnnGetShadowRowKeys(pIndex, ctx.aTopCandidates[i]->nRowid, pKey, pRows, i);
     }
     if( rc != SQLITE_OK ){
       *pzErrMsg = sqlite3_mprintf("vector index(search): failed to put result in the output row");
@@ -212865,6 +213227,9 @@ int diskAnnInsert(
   BlobSpot *pBlobSpot = NULL;
   DiskAnnNode *pVisited;
   DiskAnnSearchCtx ctx;
+  VectorPair vInsert, vCandidate;
+  vInsert.pNode = NULL; vInsert.pEdge = NULL;
+  vCandidate.pNode = NULL; vCandidate.pEdge = NULL;
 
   if( pVectorInRow->pVector->dims != pIndex->nVectorDims ){
     *pzErrMsg = sqlite3_mprintf("vector index(insert): dimensions are different: %d != %d", pVectorInRow->pVector->dims, pIndex->nVectorDims);
@@ -212877,10 +213242,22 @@ int diskAnnInsert(
 
   DiskAnnTrace(("diskAnnInset started\n"));
 
-  rc = diskAnnSearchCtxInit(&ctx, pVectorInRow->pVector, pIndex->insertL, DISKANN_BLOB_WRITABLE);
+  rc = diskAnnSearchCtxInit(pIndex, &ctx, pVectorInRow->pVector, pIndex->insertL, 1, DISKANN_BLOB_WRITABLE);
   if( rc != SQLITE_OK ){
     *pzErrMsg = sqlite3_mprintf("vector index(insert): failed to initialize search context");
     return rc;
+  }
+
+  if( initVectorPair(pIndex->nNodeVectorType, pIndex->nEdgeVectorType, pIndex->nVectorDims, &vInsert) != 0 ){
+    *pzErrMsg = sqlite3_mprintf("vector index(insert): unable to allocate mem for node VectorPair");
+    rc = SQLITE_NOMEM_BKPT;
+    goto out;
+  }
+
+  if( initVectorPair(pIndex->nNodeVectorType, pIndex->nEdgeVectorType, pIndex->nVectorDims, &vCandidate) != 0 ){
+    *pzErrMsg = sqlite3_mprintf("vector index(insert): unable to allocate mem for candidate VectorPair");
+    rc = SQLITE_NOMEM_BKPT;
+    goto out;
   }
 
   // note: we must select random row before we will insert new row in the shadow table
@@ -212920,28 +213297,33 @@ int diskAnnInsert(
   }
   // first pass - add all visited nodes as a potential neighbours of new node
   for(pVisited = ctx.visitedList; pVisited != NULL; pVisited = pVisited->pNext){
-    Vector vector;
+    Vector nodeVector;
     int iReplace;
+    float nodeToNew;
 
-    nodeBinVector(pIndex, pVisited->pBlobSpot, &vector);
-    iReplace = diskAnnReplaceEdgeIdx(pIndex, pBlobSpot, pVisited->nRowid, &vector);
+    nodeBinVector(pIndex, pVisited->pBlobSpot, &nodeVector);
+    loadVectorPair(&vCandidate, &nodeVector);
+
+    iReplace = diskAnnReplaceEdgeIdx(pIndex, pBlobSpot, pVisited->nRowid, &vCandidate, &vInsert, &nodeToNew);
     if( iReplace == -1 ){
       continue;
     }
-    nodeBinReplaceEdge(pIndex, pBlobSpot, iReplace, pVisited->nRowid, &vector);
-    diskAnnPruneEdges(pIndex, pBlobSpot, iReplace);
+    nodeBinReplaceEdge(pIndex, pBlobSpot, iReplace, pVisited->nRowid, nodeToNew, vCandidate.pEdge);
+    diskAnnPruneEdges(pIndex, pBlobSpot, iReplace, &vInsert);
   }
 
   // second pass - add new node as a potential neighbour of all visited nodes
+  loadVectorPair(&vInsert, pVectorInRow->pVector);
   for(pVisited = ctx.visitedList; pVisited != NULL; pVisited = pVisited->pNext){
     int iReplace;
+    float nodeToNew;
 
-    iReplace = diskAnnReplaceEdgeIdx(pIndex, pVisited->pBlobSpot, nNewRowid, pVectorInRow->pVector);
+    iReplace = diskAnnReplaceEdgeIdx(pIndex, pVisited->pBlobSpot, nNewRowid, &vInsert, &vCandidate, &nodeToNew);
     if( iReplace == -1 ){
       continue;
     }
-    nodeBinReplaceEdge(pIndex, pVisited->pBlobSpot, iReplace, nNewRowid, pVectorInRow->pVector);
-    diskAnnPruneEdges(pIndex, pVisited->pBlobSpot, iReplace);
+    nodeBinReplaceEdge(pIndex, pVisited->pBlobSpot, iReplace, nNewRowid, nodeToNew, vInsert.pEdge);
+    diskAnnPruneEdges(pIndex, pVisited->pBlobSpot, iReplace, &vCandidate);
 
     rc = blobSpotFlush(pIndex, pVisited->pBlobSpot);
     if( rc != SQLITE_OK ){
@@ -212952,6 +213334,8 @@ int diskAnnInsert(
 
   rc = SQLITE_OK;
 out:
+  deinitVectorPair(&vInsert);
+  deinitVectorPair(&vCandidate);
   if( rc == SQLITE_OK ){
     rc = blobSpotFlush(pIndex, pBlobSpot);
     if( rc != SQLITE_OK ){
@@ -213003,7 +213387,7 @@ int diskAnnDelete(
   nNeighbours = nodeBinEdges(pIndex, pNodeBlob);
   for(i = 0; i < nNeighbours; i++){
     u64 edgeRowid;
-    nodeBinEdge(pIndex, pNodeBlob, i, &edgeRowid, NULL);
+    nodeBinEdge(pIndex, pNodeBlob, i, &edgeRowid, NULL, NULL);
     rc = blobSpotReload(pIndex, pEdgeBlob, edgeRowid, pIndex->nBlockSize);
     if( rc == DISKANN_ROW_NOT_FOUND ){
       continue;
@@ -213050,6 +213434,7 @@ int diskAnnOpenIndex(
 ){
   DiskAnnIndex *pIndex;
   u64 nBlockSize;
+  int compressNeighbours;
   pIndex = sqlite3DbMallocRaw(db, sizeof(DiskAnnIndex));
   if( pIndex == NULL ){
     return SQLITE_NOMEM;
@@ -213096,11 +213481,20 @@ int diskAnnOpenIndex(
     pIndex->searchL = VECTOR_SEARCH_L_DEFAULT;
   }
   pIndex->nNodeVectorSize = vectorDataSize(pIndex->nNodeVectorType, pIndex->nVectorDims);
-  // will change in future when we will support compression of edges vectors
-  pIndex->nEdgeVectorType = pIndex->nNodeVectorType;
-  pIndex->nEdgeVectorSize = pIndex->nNodeVectorSize;
+
+  compressNeighbours = vectorIdxParamsGetU64(pParams, VECTOR_COMPRESS_NEIGHBORS_PARAM_ID);
+  if( compressNeighbours == 0 ){
+    pIndex->nEdgeVectorType = pIndex->nNodeVectorType;
+    pIndex->nEdgeVectorSize = pIndex->nNodeVectorSize;
+  }else if( compressNeighbours == VECTOR_TYPE_1BIT ){
+    pIndex->nEdgeVectorType = compressNeighbours;
+    pIndex->nEdgeVectorSize = vectorDataSize(compressNeighbours, pIndex->nVectorDims);
+  }else{
+    return SQLITE_ERROR;
+  }
 
   *ppIndex = pIndex;
+  DiskAnnTrace(("opened index %s: max edges %d\n", zIdxName, nodeEdgesMaxCount(pIndex)));
   return SQLITE_OK;
 }
 
@@ -213216,26 +213610,6 @@ size_t vectorF32SerializeToBlob(
   return sizeof(float) * pVector->dims;
 }
 
-size_t vectorF32DeserializeFromBlob(
-  Vector *pVector,
-  const unsigned char *pBlob,
-  size_t nBlobSize
-){
-  float *elems = pVector->data;
-  unsigned i;
-  pVector->type = VECTOR_TYPE_FLOAT32;
-  pVector->dims = nBlobSize / sizeof(float);
-
-  assert( pVector->dims <= MAX_VECTOR_SZ );
-  assert( nBlobSize % 2 == 0 || pBlob[nBlobSize - 1] == VECTOR_TYPE_FLOAT32 );
-
-  for(i = 0; i < pVector->dims; i++){
-    elems[i] = deserializeF32(pBlob);
-    pBlob += sizeof(float);
-  }
-  return vectorDataSize(pVector->type, pVector->dims);
-}
-
 void vectorF32Serialize(
   sqlite3_context *context,
   const Vector *pVector
@@ -213342,32 +213716,22 @@ void vectorF32InitFromBlob(Vector *pVector, const unsigned char *pBlob, size_t n
   pVector->data = (void*)pBlob;
 }
 
-int vectorF32ParseSqliteBlob(
-  sqlite3_value *arg,
+void vectorF32DeserializeFromBlob(
   Vector *pVector,
-  char **pzErr
+  const unsigned char *pBlob,
+  size_t nBlobSize
 ){
-  const unsigned char *pBlob;
   float *elems = pVector->data;
   unsigned i;
 
   assert( pVector->type == VECTOR_TYPE_FLOAT32 );
   assert( 0 <= pVector->dims && pVector->dims <= MAX_VECTOR_SZ );
-  assert( sqlite3_value_type(arg) == SQLITE_BLOB );
-
-  pBlob = sqlite3_value_blob(arg);
-  if( sqlite3_value_bytes(arg) < sizeof(float) * pVector->dims ){
-    *pzErr = sqlite3_mprintf("invalid f32 vector: not enough bytes for all dimensions");
-    goto error;
-  }
+  assert( nBlobSize >= pVector->dims * sizeof(float) );
 
   for(i = 0; i < pVector->dims; i++){
     elems[i] = deserializeF32(pBlob);
     pBlob += sizeof(float);
   }
-  return 0;
-error:
-  return -1;
 }
 
 #endif /* !defined(SQLITE_OMIT_VECTOR) */
@@ -213474,57 +213838,6 @@ size_t vectorF64SerializeToBlob(
   return sizeof(double) * pVector->dims;
 }
 
-size_t vectorF64DeserializeFromBlob(
-  Vector *pVector,
-  const unsigned char *pBlob,
-  size_t nBlobSize
-){
-  double *elems = pVector->data;
-  unsigned i;
-  pVector->type = VECTOR_TYPE_FLOAT64;
-  pVector->dims = nBlobSize / sizeof(double);
-
-  assert( pVector->dims <= MAX_VECTOR_SZ );
-  assert( nBlobSize % 2 == 1 && pBlob[nBlobSize - 1] == VECTOR_TYPE_FLOAT64 );
-
-  for(i = 0; i < pVector->dims; i++){
-    elems[i] = deserializeF64(pBlob);
-    pBlob += sizeof(double);
-  }
-  return vectorDataSize(pVector->type, pVector->dims);
-}
-
-void vectorF64Serialize(
-  sqlite3_context *context,
-  const Vector *pVector
-){
-  double *elems = pVector->data;
-  unsigned char *pBlob;
-  size_t nBlobSize;
-
-  assert( pVector->type == VECTOR_TYPE_FLOAT64 );
-  assert( pVector->dims <= MAX_VECTOR_SZ );
-
-  // allocate one extra trailing byte with vector blob type metadata
-  nBlobSize = vectorDataSize(pVector->type, pVector->dims) + 1;
-
-  if( nBlobSize == 0 ){
-    sqlite3_result_zeroblob(context, 0);
-    return;
-  }
-
-  pBlob = sqlite3_malloc64(nBlobSize);
-  if( pBlob == NULL ){
-    sqlite3_result_error_nomem(context);
-    return;
-  }
-
-  vectorF64SerializeToBlob(pVector, pBlob, nBlobSize - 1);
-  pBlob[nBlobSize - 1] = VECTOR_TYPE_FLOAT64;
-
-  sqlite3_result_blob(context, (char*)pBlob, nBlobSize, sqlite3_free);
-}
-
 #define SINGLE_DOUBLE_CHAR_LIMIT 32
 void vectorF64MarshalToText(
   sqlite3_context *context,
@@ -213603,32 +213916,22 @@ void vectorF64InitFromBlob(Vector *pVector, const unsigned char *pBlob, size_t n
   pVector->data = (void*)pBlob;
 }
 
-int vectorF64ParseSqliteBlob(
-  sqlite3_value *arg,
+void vectorF64DeserializeFromBlob(
   Vector *pVector,
-  char **pzErr
+  const unsigned char *pBlob,
+  size_t nBlobSize
 ){
-  const unsigned char *pBlob;
   double *elems = pVector->data;
   unsigned i;
 
   assert( pVector->type == VECTOR_TYPE_FLOAT64 );
   assert( 0 <= pVector->dims && pVector->dims <= MAX_VECTOR_SZ );
-  assert( sqlite3_value_type(arg) == SQLITE_BLOB );
-
-  pBlob = sqlite3_value_blob(arg);
-  if( sqlite3_value_bytes(arg) < sizeof(double) * pVector->dims ){
-    *pzErr = sqlite3_mprintf("invalid f64 vector: not enough bytes for all dimensions");
-    goto error;
-  }
+  assert( nBlobSize >= pVector->dims * sizeof(double) );
 
   for(i = 0; i < pVector->dims; i++){
     elems[i] = deserializeF64(pBlob);
     pBlob += sizeof(double);
   }
-  return 0;
-error:
-  return -1;
 }
 
 #endif /* !defined(SQLITE_OMIT_VECTOR) */
@@ -214033,13 +214336,14 @@ struct VectorParamName {
 };
 
 static struct VectorParamName VECTOR_PARAM_NAMES[] = {
-  { "type",          VECTOR_INDEX_TYPE_PARAM_ID,    0, "diskann", VECTOR_INDEX_TYPE_DISKANN },
-  { "metric",        VECTOR_METRIC_TYPE_PARAM_ID,   0, "cosine", VECTOR_METRIC_TYPE_COS },
-  { "metric",        VECTOR_METRIC_TYPE_PARAM_ID,   0, "l2",     VECTOR_METRIC_TYPE_L2 },
-  { "alpha",         VECTOR_PRUNING_ALPHA_PARAM_ID, 2, 0, 0 },
-  { "search_l",      VECTOR_SEARCH_L_PARAM_ID,      1, 0, 0 },
-  { "insert_l",      VECTOR_INSERT_L_PARAM_ID,      1, 0, 0 },
-  { "max_neighbors", VECTOR_MAX_NEIGHBORS_PARAM_ID, 1, 0, 0 },
+  { "type",               VECTOR_INDEX_TYPE_PARAM_ID,         0, "diskann", VECTOR_INDEX_TYPE_DISKANN },
+  { "metric",             VECTOR_METRIC_TYPE_PARAM_ID,        0, "cosine",  VECTOR_METRIC_TYPE_COS },
+  { "metric",             VECTOR_METRIC_TYPE_PARAM_ID,        0, "l2",      VECTOR_METRIC_TYPE_L2 },
+  { "compress_neighbors", VECTOR_COMPRESS_NEIGHBORS_PARAM_ID, 0, "1bit",    VECTOR_TYPE_1BIT },
+  { "alpha",              VECTOR_PRUNING_ALPHA_PARAM_ID, 2, 0, 0 },
+  { "search_l",           VECTOR_SEARCH_L_PARAM_ID,      1, 0, 0 },
+  { "insert_l",           VECTOR_INSERT_L_PARAM_ID,      1, 0, 0 },
+  { "max_neighbors",      VECTOR_MAX_NEIGHBORS_PARAM_ID, 1, 0, 0 },
 };
 
 static int parseVectorIdxParam(const char *zParam, VectorIdxParams *pParams, const char **pErrMsg) {
@@ -214439,7 +214743,7 @@ int vectorIndexCreate(Parse *pParse, const Index *pIdx, const char *zDbSName, co
   int i, rc = SQLITE_OK;
   int dims, type;
   int hasLibsqlVectorIdxFn = 0, hasCollation = 0;
-  const char *pzErrMsg;
+  const char *pzErrMsg = NULL;
 
   assert( zDbSName != NULL );
 
@@ -214551,9 +214855,13 @@ int vectorIndexCreate(Parse *pParse, const Index *pIdx, const char *zDbSName, co
     sqlite3ErrorMsg(pParse, "vector index: unsupported for tables without ROWID and composite primary key");
     return CREATE_FAIL;
   }
-  rc = diskAnnCreateIndex(db, zDbSName, pIdx->zName, &idxKey, &idxParams);
+  rc = diskAnnCreateIndex(db, zDbSName, pIdx->zName, &idxKey, &idxParams, &pzErrMsg);
   if( rc != SQLITE_OK ){
-    sqlite3ErrorMsg(pParse, "vector index: unable to initialize diskann");
+    if( pzErrMsg != NULL ){
+      sqlite3ErrorMsg(pParse, "vector index: unable to initialize diskann: %s", pzErrMsg);
+    }else{
+      sqlite3ErrorMsg(pParse, "vector index: unable to initialize diskann");
+    }
     return CREATE_FAIL;
   }
   rc = insertIndexParameters(db, zDbSName, pIdx->zName, &idxParams);
