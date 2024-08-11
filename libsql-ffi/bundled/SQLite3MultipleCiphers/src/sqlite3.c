@@ -19266,7 +19266,8 @@ struct Index {
   u16 nKeyCol;             /* Number of columns forming the key */
   u16 nColumn;             /* Number of columns stored in the index */
   u8 onError;              /* OE_Abort, OE_Ignore, OE_Replace, or OE_None */
-  unsigned idxType:3;      /* 0:Normal 1:UNIQUE, 2:PRIMARY KEY, 3:IPK, 4:VECTOR INDEX */
+  unsigned idxType:2;      /* 0:Normal 1:UNIQUE, 2:PRIMARY KEY, 3:IPK */
+  unsigned idxIsVector:1;  /* 0:Normal 1:VECTOR INDEX */
   unsigned bUnordered:1;   /* Use this index for == or IN queries only */
   unsigned uniqNotNull:1;  /* True if UNIQUE and NOT NULL for all columns */
   unsigned isResized:1;    /* True if resizeIndexObject() has been called */
@@ -19298,7 +19299,6 @@ struct Index {
 #define SQLITE_IDXTYPE_UNIQUE      1   /* Implements a UNIQUE constraint */
 #define SQLITE_IDXTYPE_PRIMARYKEY  2   /* Is the PRIMARY KEY for the table */
 #define SQLITE_IDXTYPE_IPK         3   /* INTEGER PRIMARY KEY index */
-#define SQLITE_IDXTYPE_VECTOR      4   /* libSQL vector index */
 
 /* Return true if index X is a PRIMARY KEY index */
 #define IsPrimaryKeyIndex(X)  ((X)->idxType==SQLITE_IDXTYPE_PRIMARYKEY)
@@ -19307,10 +19307,7 @@ struct Index {
 #define IsUniqueIndex(X)      ((X)->onError!=OE_None)
 
 /* Return true if index X is a vector index */
-#define IsVectorIndex(X)  ((X)->idxType==SQLITE_IDXTYPE_VECTOR)
-
-/* Return true if index X is an user defined index (APPDEF or VECTOR) */
-#define IsAppDefIndex(X)  ((X)->idxType==SQLITE_IDXTYPE_APPDEF||(X)->idxType==SQLITE_IDXTYPE_VECTOR)
+#define IsVectorIndex(X)  ((X)->idxIsVector==1)
 
 /* The Index.aiColumn[] values are normally positive integer.  But
 ** there are some negative values that have special meaning:
@@ -123188,7 +123185,7 @@ static void SQLITE_NOINLINE deleteTable(sqlite3 *db, Table *pTable){
   for(pIndex = pTable->pIndex; pIndex; pIndex=pNext){
     pNext = pIndex->pNext;
     assert( pIndex->pSchema==pTable->pSchema
-         || (IsVirtual(pTable) && !IsAppDefIndex(pIndex)) );
+         || (IsVirtual(pTable) && pIndex->idxType!=SQLITE_IDXTYPE_APPDEF) );
     if( db->pnBytesFreed==0 && !IsVirtual(pTable) ){
       char *zName = pIndex->zName;
       TESTONLY ( Index *pOld = ) sqlite3HashInsert(
@@ -126700,13 +126697,12 @@ SQLITE_PRIVATE void sqlite3CreateIndex(
     goto exit_create_index;
   }
   if( vectorIdxRc >= 1 ){
-    idxType = SQLITE_IDXTYPE_VECTOR;
     /*
      * SQLite can use B-Tree indices in some optimizations (like SELECT COUNT(*) can use any full B-Tree index instead of PK index)
      * But, SQLite pretty conservative about usage of unordered indices - that's what we need here
     */
     pIndex->bUnordered = 1;
-    pIndex->idxType = idxType;
+    pIndex->idxIsVector = 1;
   }
   if( vectorIdxRc == 1 ){
     skipRefill = 1;
@@ -126754,7 +126750,7 @@ SQLITE_PRIVATE void sqlite3CreateIndex(
     for(pIdx=pTab->pIndex; pIdx; pIdx=pIdx->pNext){
       int k;
       assert( IsUniqueIndex(pIdx) );
-      assert( !IsAppDefIndex(pIdx) );
+      assert( pIdx->idxType!=SQLITE_IDXTYPE_APPDEF );
       assert( IsUniqueIndex(pIndex) );
 
       if( pIdx->nKeyCol!=pIndex->nKeyCol ) continue;
@@ -127035,7 +127031,7 @@ SQLITE_PRIVATE void sqlite3DropIndex(Parse *pParse, SrcList *pName, int ifExists
     pParse->checkSchema = 1;
     goto exit_drop_index;
   }
-  if( !IsAppDefIndex(pIndex) ){
+  if( pIndex->idxType!=SQLITE_IDXTYPE_APPDEF ){
     sqlite3ErrorMsg(pParse, "index associated with UNIQUE "
       "or PRIMARY KEY constraint cannot be dropped", 0);
     goto exit_drop_index;
@@ -177910,9 +177906,6 @@ static YYACTIONTYPE yy_reduce(
       case 242: /* cmd ::= createkw uniqueflag INDEX ifnotexists nm dbnm indextype ON nm LP sortlist RP where_opt */
 {
   u8 idxType = SQLITE_IDXTYPE_APPDEF;
-  if( yymsp[-6].minor.yy421.pUsing!=0 ){
-    idxType = SQLITE_IDXTYPE_VECTOR;
-  }
   sqlite3CreateIndex(pParse, &yymsp[-8].minor.yy0, &yymsp[-7].minor.yy0,
                      sqlite3SrcListAppend(pParse,0,&yymsp[-4].minor.yy0,0), yymsp[-2].minor.yy402, yymsp[-11].minor.yy502,
                       &yymsp[-12].minor.yy0, yymsp[0].minor.yy590, SQLITE_SO_ASC, yymsp[-9].minor.yy502, idxType, yymsp[-6].minor.yy421.pUsing);
