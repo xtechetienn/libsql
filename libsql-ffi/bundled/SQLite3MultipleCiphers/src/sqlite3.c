@@ -85239,6 +85239,26 @@ typedef u32 VectorDims;
 #define MAX_VECTOR_SZ 65536
 
 /*
+ * on-disk binary format for vector of different types:
+ * 1. float32
+ *  [data[0] as f32] [data[1] as f32] ... [data[dims - 1] as f32] [1 as u8]?
+ *  - last 'type'-byte is optional for float32 vectors
+ *
+ * 2. float64
+ *  [data[0] as f64] [data[1] as f64] ... [data[dims - 1] as f64] [2 as u8]
+ *  - last 'type'-byte is mandatory for float64 vectors
+ *
+ * 3. float1bit
+ *  [data[0] as u8] [data[1] as u8] ... [data[(dims + 7) / 8] as u8] [_ as u8; padding]? [leftover as u8] [3 as u8]
+ *  - every data byte (except for the last) represents exactly 8 components of the vector
+ *  - last data byte represents [1..8] components of the vector
+ *  - optional padding byte ensures that leftover byte will be written at the odd blob position (0-based)
+ *  - leftover byte specify amount of trailing *bits* in the blob without last 'type'-byte which must be omitted
+ *    (so, vector dimensions are equal to 8 * (blob_size - 1) - leftover)
+ *  - last 'type'-byte is mandatory for float1bit vectors
+*/
+
+/*
  * Enumerate of supported vector types (0 omitted intentionally as we can use zero as "undefined" value)
 */
 #define VECTOR_TYPE_FLOAT32 1
@@ -211204,28 +211224,28 @@ static int vectorParseMeta(const unsigned char *pBlob, size_t nBlobSize, int *pT
 
   if( *pType == VECTOR_TYPE_FLOAT32 ){
     if( nBlobSize % 4 != 0 ){
-      *pzErrMsg = sqlite3_mprintf("invalid vector: f32 vector blob length must be divisible by 4 (excluding optional 'type'-byte): length=%d", nBlobSize);
+      *pzErrMsg = sqlite3_mprintf("vector: f32 vector blob length must be divisible by 4 (excluding optional 'type'-byte): length=%d", nBlobSize);
       return SQLITE_ERROR;
     }
     *pDims = nBlobSize / sizeof(float);
     *pDataSize = nBlobSize;
   }else if( *pType == VECTOR_TYPE_FLOAT64 ){
     if( nBlobSize % 8 != 0 ){
-      *pzErrMsg = sqlite3_mprintf("invalid vector: f64 vector blob length must be divisible by 8 (excluding 'type'-byte): length=%d", nBlobSize);
+      *pzErrMsg = sqlite3_mprintf("vector: f64 vector blob length must be divisible by 8 (excluding 'type'-byte): length=%d", nBlobSize);
       return SQLITE_ERROR;
     }
     *pDims = nBlobSize / sizeof(double);
     *pDataSize = nBlobSize;
   }else if( *pType == VECTOR_TYPE_1BIT ){
     if( nBlobSize == 0 || nBlobSize % 2 != 0 ){
-      *pzErrMsg = sqlite3_mprintf("invalid vector: 1bit vector blob length must be divisible by 2 and not be empty (excluding 'type'-byte): length=%d", nBlobSize);
+      *pzErrMsg = sqlite3_mprintf("vector: 1bit vector blob length must be divisible by 2 and not be empty (excluding 'type'-byte): length=%d", nBlobSize);
       return SQLITE_ERROR;
     }
     nLeftoverBits = pBlob[nBlobSize - 1];
     *pDims = nBlobSize * 8 - nLeftoverBits;
     *pDataSize = (*pDims + 7) / 8;
   }else{
-    *pzErrMsg = sqlite3_mprintf("invalid vector: unexpected type: %d", *pType);
+    *pzErrMsg = sqlite3_mprintf("vector: unexpected binary type: %d", *pType);
     return SQLITE_ERROR;
   }
   return SQLITE_OK;
@@ -211250,7 +211270,7 @@ int vectorParseSqliteBlobWithType(
 
   if( nDataSize != vectorDataSize(pVector->type, pVector->dims) ){
     *pzErrMsg = sqlite3_mprintf(
-      "invalid vector: unexpected data size bytes: type=%d, dims=%d, %ull != %ull",
+      "vector: unexpected data part size: type=%d, dims=%d, %ull != %ull",
       pVector->type,
       pVector->dims,
       nDataSize,
