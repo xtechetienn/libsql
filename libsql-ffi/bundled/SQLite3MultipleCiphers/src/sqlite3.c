@@ -85249,13 +85249,20 @@ typedef u32 VectorDims;
  *  - last 'type'-byte is mandatory for float64 vectors
  *
  * 3. float1bit
- *  [data[0] as u8] [data[1] as u8] ... [data[(dims + 7) / 8] as u8] [_ as u8; padding]? [leftover as u8] [3 as u8]
+ *  [data[0] as u8] [data[1] as u8] ... [data[(dims + 7) / 8] as u8] [_ as u8; padding]? [trailing_bits as u8] [3 as u8]
  *  - every data byte (except for the last) represents exactly 8 components of the vector
  *  - last data byte represents [1..8] components of the vector
- *  - optional padding byte ensures that leftover byte will be written at the odd blob position (0-based)
- *  - leftover byte specify amount of trailing *bits* in the blob without last 'type'-byte which must be omitted
- *    (so, vector dimensions are equal to 8 * (blob_size - 1) - leftover)
+ *  - optional padding byte ensures that "trailing_bits" byte will be written at the odd blob position (0-based)
+ *  - "trailing_bits" byte specify amount of trailing *bits* in the blob without last 'type'-byte which must be omitted
+ *    (so, vector dimensions are equal to 8 * (blob_size - 1) - trailing_bits)
  *  - last 'type'-byte is mandatory for float1bit vectors
+ *
+ * 4. float8
+ *  [data[0] as u8] [data[1] as u8] ... [data[dims - 1] as u8] [_ as u8; alignment_padding]* [alpha as f32] [shift as f32] [padding as u8] [trailing_bytes as u8] [4 as u8]
+ *  - every data byte represents single quantized vector component
+ *  - "alignment_padding" has size from 0 to 3 bytes in order to pad content to multiple of 4 = sizeof(float)
+ *  - "trailing_bytes" byte specify amount of bytes in the "alignment_padding"
+ *  - last 'type'-byte is mandatory for float8 vectors
 */
 
 /*
@@ -85264,8 +85271,11 @@ typedef u32 VectorDims;
 #define VECTOR_TYPE_FLOAT32   1
 #define VECTOR_TYPE_FLOAT64   2
 #define VECTOR_TYPE_FLOAT1BIT 3
+#define VECTOR_TYPE_FLOAT8    4
 
 #define VECTOR_FLAGS_STATIC 1
+
+#define ALIGN(n, size) (((n + size - 1) / size) * size)
 
 /*
  * Object which represents a vector
@@ -85287,10 +85297,14 @@ void vectorInit(Vector *, VectorType, VectorDims, void *);
 /*
  * Dumps vector on the console (used only for debugging)
 */
-void vectorDump   (const Vector *v);
+void vectorDump    (const Vector *v);
+void vectorF8Dump  (const Vector *v);
 void vectorF32Dump (const Vector *v);
 void vectorF64Dump (const Vector *v);
 void vector1BitDump(const Vector *v);
+
+void vectorF8GetParameters(const u8 *, int, float *, float *);
+void vectorF8SetParameters(u8 *, int, float, float);
 
 /*
  * Converts vector to the text representation and write the result to the sqlite3_context
@@ -85302,15 +85316,17 @@ void vectorF64MarshalToText(sqlite3_context *, const Vector *);
 /*
  * Serializes vector to the blob in little-endian format according to the IEEE-754 standard
 */
-size_t vectorSerializeToBlob    (const Vector *, unsigned char *, size_t);
-size_t vectorF32SerializeToBlob (const Vector *, unsigned char *, size_t);
-size_t vectorF64SerializeToBlob (const Vector *, unsigned char *, size_t);
-size_t vector1BitSerializeToBlob(const Vector *, unsigned char *, size_t);
+void vectorSerializeToBlob    (const Vector *, unsigned char *, size_t);
+void vectorF8SerializeToBlob  (const Vector *, unsigned char *, size_t);
+void vectorF32SerializeToBlob (const Vector *, unsigned char *, size_t);
+void vectorF64SerializeToBlob (const Vector *, unsigned char *, size_t);
+void vector1BitSerializeToBlob(const Vector *, unsigned char *, size_t);
 
 /*
  * Calculates cosine distance between two vectors (vector must have same type and same dimensions)
 */
 float vectorDistanceCos    (const Vector *, const Vector *);
+float vectorF8DistanceCos  (const Vector *, const Vector *);
 float vectorF32DistanceCos (const Vector *, const Vector *);
 double vectorF64DistanceCos(const Vector *, const Vector *);
 
@@ -85323,6 +85339,7 @@ int vector1BitDistanceHamming(const Vector *, const Vector *);
  * Calculates L2 distance between two vectors (vector must have same type and same dimensions)
 */
 float vectorDistanceL2    (const Vector *, const Vector *);
+float vectorF8DistanceL2  (const Vector *, const Vector *);
 float vectorF32DistanceL2 (const Vector *, const Vector *);
 double vectorF64DistanceL2(const Vector *, const Vector *);
 
@@ -85338,6 +85355,7 @@ void vectorSerializeWithMeta(sqlite3_context *, const Vector *);
 */
 int vectorParseSqliteBlobWithType(sqlite3_value *, Vector *, char **);
 
+void vectorF8DeserializeFromBlob  (Vector *, const unsigned char *, size_t);
 void vectorF32DeserializeFromBlob (Vector *, const unsigned char *, size_t);
 void vectorF64DeserializeFromBlob (Vector *, const unsigned char *, size_t);
 void vector1BitDeserializeFromBlob(Vector *, const unsigned char *, size_t);
@@ -85349,6 +85367,24 @@ void vectorConvert(const Vector *, Vector *);
 
 /* Detect type and dimension of vector provided with first parameter of sqlite3_value * type */
 int detectVectorParameters(sqlite3_value *, int, int *, int *, char **);
+
+static inline unsigned serializeF32(unsigned char *pBuf, float value){
+  u32 *p = (u32 *)&value;
+  pBuf[0] = *p & 0xFF;
+  pBuf[1] = (*p >> 8) & 0xFF;
+  pBuf[2] = (*p >> 16) & 0xFF;
+  pBuf[3] = (*p >> 24) & 0xFF;
+  return sizeof(float);
+}
+
+static inline float deserializeF32(const unsigned char *pBuf){
+  u32 value = 0;
+  value |= (u32)pBuf[0];
+  value |= (u32)pBuf[1] << 8;
+  value |= (u32)pBuf[2] << 16;
+  value |= (u32)pBuf[3] << 24;
+  return *(float *)&value;
+}
 
 #if 0
 }  /* end of the 'extern "C"' block */
@@ -211001,6 +211037,8 @@ size_t vectorDataSize(VectorType type, VectorDims dims){
       return dims * sizeof(double);
     case VECTOR_TYPE_FLOAT1BIT:
       return (dims + 7) / 8;
+    case VECTOR_TYPE_FLOAT8:
+      return ALIGN(dims, sizeof(float)) + sizeof(float) /* alpha */ + sizeof(float) /* shift */;
     default:
       assert(0);
   }
@@ -211074,6 +211112,8 @@ float vectorDistanceCos(const Vector *pVector1, const Vector *pVector2){
       return vectorF64DistanceCos(pVector1, pVector2);
     case VECTOR_TYPE_FLOAT1BIT:
       return vector1BitDistanceHamming(pVector1, pVector2);
+    case VECTOR_TYPE_FLOAT8:
+      return vectorF8DistanceCos(pVector1, pVector2);
     default:
       assert(0);
   }
@@ -211087,6 +211127,8 @@ float vectorDistanceL2(const Vector *pVector1, const Vector *pVector2){
       return vectorF32DistanceL2(pVector1, pVector2);
     case VECTOR_TYPE_FLOAT64:
       return vectorF64DistanceL2(pVector1, pVector2);
+    case VECTOR_TYPE_FLOAT8:
+      return vectorF8DistanceL2(pVector1, pVector2);
     default:
       assert(0);
   }
@@ -211211,7 +211253,8 @@ error:
 }
 
 static int vectorParseMeta(const unsigned char *pBlob, size_t nBlobSize, int *pType, int *pDims, size_t *pDataSize, char **pzErrMsg){
-  int nLeftoverBits;
+  int nTrailingBits;
+  int nTrailingBytes;
 
   if( nBlobSize % 2 == 0 ){
     *pType = VECTOR_TYPE_FLOAT32;
@@ -211224,26 +211267,34 @@ static int vectorParseMeta(const unsigned char *pBlob, size_t nBlobSize, int *pT
 
   if( *pType == VECTOR_TYPE_FLOAT32 ){
     if( nBlobSize % 4 != 0 ){
-      *pzErrMsg = sqlite3_mprintf("vector: f32 vector blob length must be divisible by 4 (excluding optional 'type'-byte): length=%d", nBlobSize);
+      *pzErrMsg = sqlite3_mprintf("vector: float32 vector blob length must be divisible by 4 (excluding optional 'type'-byte): length=%d", nBlobSize);
       return SQLITE_ERROR;
     }
     *pDims = nBlobSize / sizeof(float);
     *pDataSize = nBlobSize;
   }else if( *pType == VECTOR_TYPE_FLOAT64 ){
     if( nBlobSize % 8 != 0 ){
-      *pzErrMsg = sqlite3_mprintf("vector: f64 vector blob length must be divisible by 8 (excluding 'type'-byte): length=%d", nBlobSize);
+      *pzErrMsg = sqlite3_mprintf("vector: float64 vector blob length must be divisible by 8 (excluding 'type'-byte): length=%d", nBlobSize);
       return SQLITE_ERROR;
     }
     *pDims = nBlobSize / sizeof(double);
     *pDataSize = nBlobSize;
   }else if( *pType == VECTOR_TYPE_FLOAT1BIT ){
     if( nBlobSize == 0 || nBlobSize % 2 != 0 ){
-      *pzErrMsg = sqlite3_mprintf("vector: 1bit vector blob length must be divisible by 2 and not be empty (excluding 'type'-byte): length=%d", nBlobSize);
+      *pzErrMsg = sqlite3_mprintf("vector: float1bit vector blob length must be divisible by 2 and not be empty (excluding 'type'-byte): length=%d", nBlobSize);
       return SQLITE_ERROR;
     }
-    nLeftoverBits = pBlob[nBlobSize - 1];
-    *pDims = nBlobSize * 8 - nLeftoverBits;
+    nTrailingBits = pBlob[nBlobSize - 1];
+    *pDims = nBlobSize * 8 - nTrailingBits;
     *pDataSize = (*pDims + 7) / 8;
+  }else if( *pType == VECTOR_TYPE_FLOAT8 ){
+    if( nBlobSize < 2 || nBlobSize % 2 != 0 ){
+      *pzErrMsg = sqlite3_mprintf("vector: float8 vector blob length must be divisible by 2 and has at least 2 bytes (excluding 'type'-byte): length=%d", nBlobSize);
+      return SQLITE_ERROR;
+    }
+    nTrailingBytes = pBlob[nBlobSize - 1];
+    *pDims = (nBlobSize - 2) - sizeof(float) - sizeof(float) - nTrailingBytes;
+    *pDataSize = nBlobSize - 2;
   }else{
     *pzErrMsg = sqlite3_mprintf("vector: unexpected binary type: %d", *pType);
     return SQLITE_ERROR;
@@ -211288,6 +211339,9 @@ int vectorParseSqliteBlobWithType(
       return 0;
     case VECTOR_TYPE_FLOAT1BIT:
       vector1BitDeserializeFromBlob(pVector, pBlob, nDataSize);
+      return 0;
+    case VECTOR_TYPE_FLOAT8:
+      vectorF8DeserializeFromBlob(pVector, pBlob, nDataSize);
       return 0;
     default:
       assert(0);
@@ -211387,6 +211441,9 @@ void vectorDump(const Vector *pVector){
     case VECTOR_TYPE_FLOAT1BIT:
       vector1BitDump(pVector);
       break;
+    case VECTOR_TYPE_FLOAT8:
+      vectorF8Dump(pVector);
+      break;
     default:
       assert(0);
   }
@@ -211409,7 +211466,6 @@ void vectorMarshalToText(
 }
 
 static int vectorMetaSize(VectorType type, VectorDims dims){
-  int nMetaSize = 0;
   int nDataSize;
   if( type == VECTOR_TYPE_FLOAT32 ){
     return 0;
@@ -211417,12 +211473,13 @@ static int vectorMetaSize(VectorType type, VectorDims dims){
     return 1;
   }else if( type == VECTOR_TYPE_FLOAT1BIT ){
     nDataSize = vectorDataSize(type, dims);
-    nMetaSize++; // one byte which specify amount of leftover bits
-    if( nDataSize % 2 == 0 ){
-      nMetaSize++; // pad "leftover-bits" byte to the even length
-    }
-    nMetaSize++; // one byte for vector type
-    return nMetaSize;
+    // optional padding byte + "trailing-bits" byte + "vector-type" byte
+    return (nDataSize % 2 == 0 ? 1 : 0) + 1 + 1;
+  }else if( type == VECTOR_TYPE_FLOAT8 ){
+    nDataSize = vectorDataSize(type, dims);
+    assert( nDataSize % 2 == 0 );
+    /* padding byte + "trailing-bytes" byte + "vector-type" byte */
+    return 1 + 1 + 1;
   }else{
     assert( 0 );
   }
@@ -211440,6 +211497,15 @@ static void vectorSerializeMeta(const Vector *pVector, size_t nDataSize, unsigne
     assert( nBlobSize >= 3 );
     pBlob[nBlobSize - 1] = VECTOR_TYPE_FLOAT1BIT;
     pBlob[nBlobSize - 2] = 8 * (nBlobSize - 1) - pVector->dims;
+    if( vectorMetaSize(pVector->type, pVector->dims) == 3 ){
+      pBlob[nBlobSize - 3] = 0;
+    }
+  }else if( pVector->type == VECTOR_TYPE_FLOAT8 ){
+    assert( nBlobSize % 2 == 1 );
+    assert( nDataSize % 2 == 0 );
+    assert( nBlobSize == nDataSize + 3 );
+    pBlob[nBlobSize - 1] = VECTOR_TYPE_FLOAT8;
+    pBlob[nBlobSize - 2] = ALIGN(pVector->dims, sizeof(float)) - pVector->dims;
   }else{
     assert( 0 );
   }
@@ -211468,35 +211534,28 @@ void vectorSerializeWithMeta(
     return;
   }
 
-  switch (pVector->type) {
-    case VECTOR_TYPE_FLOAT32:
-      vectorF32SerializeToBlob(pVector, pBlob, nDataSize);
-      break;
-    case VECTOR_TYPE_FLOAT64:
-      vectorF64SerializeToBlob(pVector, pBlob, nDataSize);
-      break;
-    case VECTOR_TYPE_FLOAT1BIT:
-      vector1BitSerializeToBlob(pVector, pBlob, nDataSize);
-      break;
-    default:
-      assert(0);
-  }
+  vectorSerializeToBlob(pVector, pBlob, nDataSize);
   vectorSerializeMeta(pVector, nDataSize, pBlob, nBlobSize);
   sqlite3_result_blob(context, (char*)pBlob, nBlobSize, sqlite3_free);
 }
 
-size_t vectorSerializeToBlob(const Vector *pVector, unsigned char *pBlob, size_t nBlobSize){
+void vectorSerializeToBlob(const Vector *pVector, unsigned char *pBlob, size_t nBlobSize){
   switch (pVector->type) {
     case VECTOR_TYPE_FLOAT32:
-      return vectorF32SerializeToBlob(pVector, pBlob, nBlobSize);
+      vectorF32SerializeToBlob(pVector, pBlob, nBlobSize);
+      break;
     case VECTOR_TYPE_FLOAT64:
-      return vectorF64SerializeToBlob(pVector, pBlob, nBlobSize);
+      vectorF64SerializeToBlob(pVector, pBlob, nBlobSize);
+      break;
     case VECTOR_TYPE_FLOAT1BIT:
-      return vector1BitSerializeToBlob(pVector, pBlob, nBlobSize);
+      vector1BitSerializeToBlob(pVector, pBlob, nBlobSize);
+      break;
+    case VECTOR_TYPE_FLOAT8:
+      vectorF8SerializeToBlob(pVector, pBlob, nBlobSize);
+      break;
     default:
       assert(0);
   }
-  return 0;
 }
 
 void vectorInitFromBlob(Vector *pVector, const unsigned char *pBlob, size_t nBlobSize){
@@ -211602,6 +211661,110 @@ static void vectorConvertFrom1Bit(const Vector *pFrom, Vector *pTo){
   }
 }
 
+static void vectorConvertFromF8(const Vector *pFrom, Vector *pTo){
+  int i;
+  u8 *src;
+  float alpha, shift;
+
+  float *dstF32;
+  double *dstF64;
+  u8 *dst1Bit;
+
+  assert( pFrom->dims == pTo->dims );
+  assert( pFrom->type != pTo->type );
+  assert( pFrom->type == VECTOR_TYPE_FLOAT8 );
+
+  vectorF8GetParameters(pFrom->data, pFrom->dims, &alpha, &shift);
+
+  src = pFrom->data;
+  if( pTo->type == VECTOR_TYPE_FLOAT32 ){
+    dstF32 = pTo->data;
+    for(i = 0; i < pFrom->dims; i++){
+      dstF32[i] = alpha * src[i] + shift;
+    }
+  }else if( pTo->type == VECTOR_TYPE_FLOAT64 ){
+    dstF64 = pTo->data;
+    for(i = 0; i < pFrom->dims; i++){
+      dstF64[i] = alpha * src[i] + shift;
+    }
+  }else if( pTo->type == VECTOR_TYPE_FLOAT1BIT ){
+    dst1Bit = pTo->data;
+    for(i = 0; i < pFrom->dims; i += 8){
+      dst1Bit[i / 8] = 0;
+    }
+    for(i = 0; i < pFrom->dims; i++){
+      if( (alpha * src[i] + shift) > 0 ){
+        dst1Bit[i / 8] |= (1 << (i & 7));
+      }
+    }
+  }else{
+    assert( 0 );
+  }
+}
+
+static inline int clip(float f, int minF, int maxF){
+  if( f < minF ){
+    return minF;
+  }else if( f > maxF ){
+    return maxF;
+  }
+  return (int)(f + 0.5);
+}
+
+#define MINMAX(i, value, minValue, maxValue) {if(i == 0){ minValue = (value); maxValue = (value);} else { minValue = MIN(minValue, (value)); maxValue = MAX(maxValue, (value)); }}
+
+static void vectorConvertToF8(const Vector *pFrom, Vector *pTo){
+  int i;
+  u8 *dst;
+  float alpha, shift;
+  float minF = 0, maxF = 0;
+
+  float *srcF32;
+  double *srcF64;
+  u8 *src1Bit;
+
+  assert( pFrom->dims == pTo->dims );
+  assert( pFrom->type != pTo->type );
+  assert( pTo->type == VECTOR_TYPE_FLOAT8 );
+
+  dst = pTo->data;
+  if( pFrom->type == VECTOR_TYPE_FLOAT32 ){
+    srcF32 = pFrom->data;
+    for(i = 0; i < pFrom->dims; i++){
+      MINMAX(i, srcF32[i], minF, maxF);
+    }
+    shift = minF;
+    alpha = (maxF - minF) / 255;
+    for(i = 0; i < pFrom->dims; i++){
+      dst[i] = clip((srcF32[i] - shift) / alpha, 0, 255);
+    }
+  }else if( pFrom->type == VECTOR_TYPE_FLOAT64 ){
+    srcF64 = pFrom->data;
+    for(i = 0; i < pFrom->dims; i++){
+      MINMAX(i, srcF64[i], minF, maxF);
+    }
+    shift = minF;
+    alpha = (maxF - minF) / 255;
+    for(i = 0; i < pFrom->dims; i++){
+      dst[i] = clip((srcF64[i] - shift) / alpha, 0, 255);
+    }
+  }else if( pFrom->type == VECTOR_TYPE_FLOAT1BIT ){
+    src1Bit = pFrom->data;
+    for(i = 0; i < pFrom->dims; i++){
+      MINMAX(i, ((src1Bit[i / 8] >> (i & 7)) & 1) ? +1 : -1, minF, maxF);
+    }
+    shift = minF;
+    alpha = (maxF - minF) / 255;
+    for(i = 0; i < pFrom->dims; i++){
+      dst[i] = clip(((((src1Bit[i / 8] >> (i & 7)) & 1) ? +1 : -1) - shift) / alpha, 0, 255);
+    }
+  }else{
+    assert( 0 );
+  }
+  vectorF8SetParameters(pTo->data, pTo->dims, alpha, shift);
+}
+
+
 void vectorConvert(const Vector *pFrom, Vector *pTo){
   assert( pFrom->dims == pTo->dims );
 
@@ -211610,12 +211773,16 @@ void vectorConvert(const Vector *pFrom, Vector *pTo){
     return;
   }
 
-  if( pFrom->type == VECTOR_TYPE_FLOAT32 ){
+  if( pTo->type == VECTOR_TYPE_FLOAT8 ){
+    vectorConvertToF8(pFrom, pTo);
+  }else if( pFrom->type == VECTOR_TYPE_FLOAT32 ){
     vectorConvertFromF32(pFrom, pTo);
   }else if( pFrom->type == VECTOR_TYPE_FLOAT64 ){
     vectorConvertFromF64(pFrom, pTo);
   }else if( pFrom->type == VECTOR_TYPE_FLOAT1BIT ){
     vectorConvertFrom1Bit(pFrom, pTo);
+  }else if( pFrom->type == VECTOR_TYPE_FLOAT8 ){
+    vectorConvertFromF8(pFrom, pTo);
   }else{
     assert( 0 );
   }
@@ -211692,6 +211859,14 @@ static void vector64Func(
   vectorFuncHintedType(context, argc, argv, VECTOR_TYPE_FLOAT64);
 }
 
+static void vector8Func(
+  sqlite3_context *context,
+  int argc,
+  sqlite3_value **argv
+){
+  vectorFuncHintedType(context, argc, argv, VECTOR_TYPE_FLOAT8);
+}
+
 static void vector1BitFunc(
   sqlite3_context *context,
   int argc,
@@ -211749,13 +211924,11 @@ out:
   }
 }
 
-/*
-** Implementation of vector_distance_cos(X, Y) function.
-*/
-static void vectorDistanceCosFunc(
+static void vectorDistanceFunc(
   sqlite3_context *context,
   int argc,
-  sqlite3_value **argv
+  sqlite3_value **argv,
+  float (*vectorDistance)(const Vector *pVector1, const Vector *pVector2)
 ){
   char *pzErrMsg = NULL;
   Vector *pVector1 = NULL, *pVector2 = NULL;
@@ -211775,13 +211948,19 @@ static void vectorDistanceCosFunc(
     goto out_free;
   }
   if( type1 != type2 ){
-    pzErrMsg = sqlite3_mprintf("vector_distance_cos: vectors must have the same type: %d != %d", type1, type2);
+    pzErrMsg = sqlite3_mprintf("vector_distance: vectors must have the same type: %d != %d", type1, type2);
     sqlite3_result_error(context, pzErrMsg, -1);
     sqlite3_free(pzErrMsg);
     goto out_free;
   }
   if( dims1 != dims2 ){
-    pzErrMsg = sqlite3_mprintf("vector_distance_cos: vectors must have the same length: %d != %d", dims1, dims2);
+    pzErrMsg = sqlite3_mprintf("vector_distance: vectors must have the same length: %d != %d", dims1, dims2);
+    sqlite3_result_error(context, pzErrMsg, -1);
+    sqlite3_free(pzErrMsg);
+    goto out_free;
+  }
+  if( vectorDistance == vectorDistanceL2 && type1 == VECTOR_TYPE_FLOAT1BIT ){
+    pzErrMsg = sqlite3_mprintf("vector_distance: l2 distance is not supported for float1bit vectors", dims1, dims2);
     sqlite3_result_error(context, pzErrMsg, -1);
     sqlite3_free(pzErrMsg);
     goto out_free;
@@ -211804,7 +211983,7 @@ static void vectorDistanceCosFunc(
     sqlite3_free(pzErrMsg);
     goto out_free;
   }
-  sqlite3_result_double(context, vectorDistanceCos(pVector1, pVector2));
+  sqlite3_result_double(context, vectorDistance(pVector1, pVector2));
 out_free:
   if( pVector2 ){
     vectorFree(pVector2);
@@ -211812,6 +211991,20 @@ out_free:
   if( pVector1 ){
     vectorFree(pVector1);
   }
+}
+
+/*
+** Implementation of vector_distance_cos(X, Y) function.
+*/
+static void vectorDistanceCosFunc(sqlite3_context *context, int argc, sqlite3_value **argv){
+  vectorDistanceFunc(context, argc, argv, vectorDistanceCos);
+}
+
+/*
+** Implementation of vector_distance_l2(X, Y) function.
+*/
+static void vectorDistanceL2Func(sqlite3_context *context, int argc, sqlite3_value **argv){
+  vectorDistanceFunc(context, argc, argv, vectorDistanceL2);
 }
 
 /*
@@ -211831,8 +212024,10 @@ SQLITE_PRIVATE void sqlite3RegisterVectorFunctions(void){
     FUNCTION(vector32,            1, 0, 0, vector32Func),
     FUNCTION(vector64,            1, 0, 0, vector64Func),
     FUNCTION(vector1bit,          1, 0, 0, vector1BitFunc),
+    FUNCTION(vector8,             1, 0, 0, vector8Func),
     FUNCTION(vector_extract,      1, 0, 0, vectorExtractFunc),
     FUNCTION(vector_distance_cos, 2, 0, 0, vectorDistanceCosFunc),
+    FUNCTION(vector_distance_l2,  2, 0, 0, vectorDistanceL2Func),
 
     FUNCTION(libsql_vector_idx,  -1, 0, 0, libsqlVectorIdx),
   };
@@ -213679,7 +213874,7 @@ void vector1BitDump(const Vector *pVec){
 ** Utility routines for vector serialization and deserialization
 **************************************************************************/
 
-size_t vector1BitSerializeToBlob(
+void vector1BitSerializeToBlob(
   const Vector *pVector,
   unsigned char *pBlob,
   size_t nBlobSize
@@ -213690,12 +213885,11 @@ size_t vector1BitSerializeToBlob(
 
   assert( pVector->type == VECTOR_TYPE_FLOAT1BIT );
   assert( pVector->dims <= MAX_VECTOR_SZ );
-  assert( nBlobSize >= (pVector->dims + 7) / 8 );
+  assert( nBlobSize >= vectorDataSize(pVector->type, pVector->dims) );
 
   for(i = 0; i < (pVector->dims + 7) / 8; i++){
     pPtr[i] = elems[i];
   }
-  return (pVector->dims + 7) / 8;
 }
 
 // [sum(map(int, bin(i)[2:])) for i in range(256)]
@@ -213760,7 +213954,7 @@ void vector1BitDeserializeFromBlob(
 
   assert( pVector->type == VECTOR_TYPE_FLOAT1BIT );
   assert( 0 <= pVector->dims && pVector->dims <= MAX_VECTOR_SZ );
-  assert( nBlobSize >= (pVector->dims + 7) / 8 );
+  assert( nBlobSize >= vectorDataSize(pVector->type, pVector->dims) );
 
   memcpy(elems, pBlob, (pVector->dims + 7) / 8);
 }
@@ -213828,25 +214022,7 @@ static inline unsigned formatF32(float value, char *pBuf, int nBufSize){
   return strlen(pBuf);
 }
 
-static inline unsigned serializeF32(unsigned char *pBuf, float value){
-  u32 *p = (u32 *)&value;
-  pBuf[0] = *p & 0xFF;
-  pBuf[1] = (*p >> 8) & 0xFF;
-  pBuf[2] = (*p >> 16) & 0xFF;
-  pBuf[3] = (*p >> 24) & 0xFF;
-  return sizeof(float);
-}
-
-static inline float deserializeF32(const unsigned char *pBuf){
-  u32 value = 0;
-  value |= (u32)pBuf[0];
-  value |= (u32)pBuf[1] << 8;
-  value |= (u32)pBuf[2] << 16;
-  value |= (u32)pBuf[3] << 24;
-  return *(float *)&value;
-}
-
-size_t vectorF32SerializeToBlob(
+void vectorF32SerializeToBlob(
   const Vector *pVector,
   unsigned char *pBlob,
   size_t nBlobSize
@@ -213858,12 +214034,11 @@ size_t vectorF32SerializeToBlob(
 
   assert( pVector->type == VECTOR_TYPE_FLOAT32 );
   assert( pVector->dims <= MAX_VECTOR_SZ );
-  assert( nBlobSize >= pVector->dims * sizeof(float) );
+  assert( nBlobSize >= vectorDataSize(pVector->type, pVector->dims) );
 
   for(i = 0; i < pVector->dims; i++){
     pPtr += serializeF32(pPtr, elems[i]);
   }
-  return sizeof(float) * pVector->dims;
 }
 
 #define SINGLE_FLOAT_CHAR_LIMIT 32
@@ -213949,7 +214124,7 @@ void vectorF32DeserializeFromBlob(
 
   assert( pVector->type == VECTOR_TYPE_FLOAT32 );
   assert( 0 <= pVector->dims && pVector->dims <= MAX_VECTOR_SZ );
-  assert( nBlobSize >= pVector->dims * sizeof(float) );
+  assert( nBlobSize >= vectorDataSize(pVector->type, pVector->dims) );
 
   for(i = 0; i < pVector->dims; i++){
     elems[i] = deserializeF32(pBlob);
@@ -214046,7 +214221,7 @@ static inline double deserializeF64(const unsigned char *pBuf){
   return *(double *)&value;
 }
 
-size_t vectorF64SerializeToBlob(
+void vectorF64SerializeToBlob(
   const Vector *pVector,
   unsigned char *pBlob,
   size_t nBlobSize
@@ -214057,12 +214232,11 @@ size_t vectorF64SerializeToBlob(
 
   assert( pVector->type == VECTOR_TYPE_FLOAT64 );
   assert( pVector->dims <= MAX_VECTOR_SZ );
-  assert( nBlobSize >= pVector->dims * sizeof(double) );
+  assert( nBlobSize >= vectorDataSize(pVector->type, pVector->dims) );
 
   for (i = 0; i < pVector->dims; i++) {
     pPtr += serializeF64(pPtr, elems[i]);
   }
-  return sizeof(double) * pVector->dims;
 }
 
 #define SINGLE_DOUBLE_CHAR_LIMIT 32
@@ -214148,7 +214322,7 @@ void vectorF64DeserializeFromBlob(
 
   assert( pVector->type == VECTOR_TYPE_FLOAT64 );
   assert( 0 <= pVector->dims && pVector->dims <= MAX_VECTOR_SZ );
-  assert( nBlobSize >= pVector->dims * sizeof(double) );
+  assert( nBlobSize >= vectorDataSize(pVector->type, pVector->dims) );
 
   for(i = 0; i < pVector->dims; i++){
     elems[i] = deserializeF64(pBlob);
@@ -214159,6 +214333,171 @@ void vectorF64DeserializeFromBlob(
 #endif /* !defined(SQLITE_OMIT_VECTOR) */
 
 /************** End of vectorfloat64.c ***************************************/
+/************** Begin file vectorfloat8.c ************************************/
+/*
+** 2024-07-04
+**
+** Copyright 2024 the libSQL authors
+**
+** Permission is hereby granted, free of charge, to any person obtaining a copy of
+** this software and associated documentation files (the "Software"), to deal in
+** the Software without restriction, including without limitation the rights to
+** use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+** the Software, and to permit persons to whom the Software is furnished to do so,
+** subject to the following conditions:
+**
+** The above copyright notice and this permission notice shall be included in all
+** copies or substantial portions of the Software.
+**
+** THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+** IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+** FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+** COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+** IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+** CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+**
+******************************************************************************
+**
+** 8-bit (INT8) floating point vector format utilities.
+**
+** The idea is to replace vector [f_0, f_1, ... f_k] with quantized uint8 values [q_0, q_1, ..., q_k] in such a way that
+** f_i = alpha * q_i + shift, when alpha and shift determined from all f_i values like that:
+** alpha = (max(f) - min(f)) / 255, shift = min(f)
+**
+** This differs from uint8 quantization in neural-network as it usually take form of f_i = alpha * (q_i - z) conversion instead
+** But, neural-network uint8 quantization is less generic and works better for distributions centered around zero (symmetric or not)
+** In our implementation we want to handle more generic cases - so profits from neural-network-style quantization are not clear
+*/
+#ifndef SQLITE_OMIT_VECTOR
+/* #include "sqliteInt.h" */
+
+/* #include "vectorInt.h" */
+
+/* #include <math.h> */
+
+/**************************************************************************
+** Utility routines for vector serialization and deserialization
+**************************************************************************/
+
+void vectorF8GetParameters(const u8 *pData, int dims, float *pAlpha, float *pShift){
+  pData = pData + ALIGN(dims, sizeof(float));
+  *pAlpha = deserializeF32(pData);
+  *pShift = deserializeF32(pData + sizeof(*pAlpha));
+}
+
+void vectorF8SetParameters(u8 *pData, int dims, float alpha, float shift){
+  pData = pData + ALIGN(dims, sizeof(float));
+  serializeF32(pData, alpha);
+  serializeF32(pData + sizeof(alpha), shift);
+}
+
+void vectorF8Dump(const Vector *pVec){
+  u8 *elems = pVec->data;
+  float alpha, shift;
+  unsigned i;
+
+  assert( pVec->type == VECTOR_TYPE_FLOAT8 );
+
+  vectorF8GetParameters(pVec->data, pVec->dims, &alpha, &shift);
+
+  printf("f8: [");
+  for(i = 0; i < pVec->dims; i++){
+    printf("%s%f", i == 0 ? "" : ", ", (float)elems[i] * alpha + shift);
+  }
+  printf("]\n");
+}
+
+void vectorF8SerializeToBlob(
+  const Vector *pVector,
+  unsigned char *pBlob,
+  size_t nBlobSize
+){
+  float alpha, shift;
+
+  assert( pVector->type == VECTOR_TYPE_FLOAT8 );
+  assert( pVector->dims <= MAX_VECTOR_SZ );
+  assert( nBlobSize >= vectorDataSize(pVector->type, pVector->dims) );
+
+  memcpy(pBlob, pVector->data, pVector->dims);
+
+  vectorF8GetParameters(pVector->data, pVector->dims, &alpha, &shift);
+  vectorF8SetParameters(pBlob, pVector->dims, alpha, shift);
+}
+
+float vectorF8DistanceCos(const Vector *v1, const Vector *v2){
+  int i;
+  float alpha1, shift1, alpha2, shift2;
+  u32 sum1 = 0, sum2 = 0, sumsq1 = 0, sumsq2 = 0, doti = 0;
+  float dot = 0, norm1 = 0, norm2 = 0;
+  u8 *data1 = v1->data, *data2 = v2->data;
+
+  assert( v1->dims == v2->dims );
+  assert( v1->type == VECTOR_TYPE_FLOAT8 );
+  assert( v2->type == VECTOR_TYPE_FLOAT8 );
+
+  vectorF8GetParameters(v1->data, v1->dims, &alpha1, &shift1);
+  vectorF8GetParameters(v2->data, v2->dims, &alpha2, &shift2);
+
+  /*
+   * (Ax + S)^2 = A^2 x^2 + 2AS x + S^2 -> we need to maintain 'sumsq' and 'sum'
+   * (A1x + S1) * (A2y + S2) = A1A2 xy + A1 S2 x + A2 S1 y + S1 S2 -> we need to maintain 'dot' and 'sum' again
+  */
+
+  for(i = 0; i < v1->dims; i++){
+    sum1 += data1[i];
+    sum2 += data2[i];
+    sumsq1 += data1[i]*data1[i];
+    sumsq2 += data2[i]*data2[i];
+    doti += data1[i]*data2[i];
+  }
+
+  dot = alpha1 * alpha2 * (float)doti + alpha1 * shift2 * (float)sum1 + alpha2 * shift1 * (float)sum2 + shift1 * shift2 * v1->dims;
+  norm1 = alpha1 * alpha1 * (float)sumsq1 + 2 * alpha1 * shift1 * (float)sum1 + shift1 * shift1 * v1->dims;
+  norm2 = alpha2 * alpha2 * (float)sumsq2 + 2 * alpha2 * shift2 * (float)sum2 + shift2 * shift2 * v1->dims;
+
+  return 1.0 - (dot / sqrt(norm1 * norm2));
+}
+
+float vectorF8DistanceL2(const Vector *v1, const Vector *v2){
+  int i;
+  float alpha1, shift1, alpha2, shift2;
+  float sum = 0;
+  u8 *data1 = v1->data, *data2 = v2->data;
+
+  assert( v1->dims == v2->dims );
+  assert( v1->type == VECTOR_TYPE_FLOAT8 );
+  assert( v2->type == VECTOR_TYPE_FLOAT8 );
+
+  vectorF8GetParameters(v1->data, v1->dims, &alpha1, &shift1);
+  vectorF8GetParameters(v2->data, v2->dims, &alpha2, &shift2);
+
+  for(i = 0; i < v1->dims; i++){
+    float d = (alpha1 * data1[i] + shift1) - (alpha2 * data2[i] + shift2);
+    sum += d*d;
+  }
+  return sqrt(sum);
+}
+
+void vectorF8DeserializeFromBlob(
+  Vector *pVector,
+  const unsigned char *pBlob,
+  size_t nBlobSize
+){
+  float alpha, shift;
+
+  assert( pVector->type == VECTOR_TYPE_FLOAT8 );
+  assert( 0 <= pVector->dims && pVector->dims <= MAX_VECTOR_SZ );
+  assert( nBlobSize >= vectorDataSize(pVector->type, pVector->dims) );
+
+  memcpy((u8*)pVector->data, (u8*)pBlob, ALIGN(pVector->dims, sizeof(float)));
+
+  vectorF8GetParameters(pBlob, pVector->dims, &alpha, &shift);
+  vectorF8SetParameters(pVector->data, pVector->dims, alpha, shift);
+}
+
+#endif /* !defined(SQLITE_OMIT_VECTOR) */
+
+/************** End of vectorfloat8.c ****************************************/
 /************** Begin file vectorIndex.c *************************************/
 /*
 ** 2024-03-18
@@ -214545,6 +214884,8 @@ static struct VectorColumnType VECTOR_COLUMN_TYPES[] = {
   { "F64_BLOB",   VECTOR_TYPE_FLOAT64 },
   { "FLOAT1BIT",  VECTOR_TYPE_FLOAT1BIT },
   { "F1BIT_BLOB", VECTOR_TYPE_FLOAT1BIT },
+  { "FLOAT8",     VECTOR_TYPE_FLOAT8 },
+  { "F8_BLOB",    VECTOR_TYPE_FLOAT8 },
 };
 
 /*
@@ -214564,6 +214905,7 @@ static struct VectorParamName VECTOR_PARAM_NAMES[] = {
   { "metric",             VECTOR_METRIC_TYPE_PARAM_ID,        0, "cosine",    VECTOR_METRIC_TYPE_COS },
   { "metric",             VECTOR_METRIC_TYPE_PARAM_ID,        0, "l2",        VECTOR_METRIC_TYPE_L2 },
   { "compress_neighbors", VECTOR_COMPRESS_NEIGHBORS_PARAM_ID, 0, "float1bit", VECTOR_TYPE_FLOAT1BIT },
+  { "compress_neighbors", VECTOR_COMPRESS_NEIGHBORS_PARAM_ID, 0, "float8",    VECTOR_TYPE_FLOAT8 },
   { "compress_neighbors", VECTOR_COMPRESS_NEIGHBORS_PARAM_ID, 0, "float32",   VECTOR_TYPE_FLOAT32 },
   { "alpha",              VECTOR_PRUNING_ALPHA_PARAM_ID, 2, 0, 0 },
   { "search_l",           VECTOR_SEARCH_L_PARAM_ID,      1, 0, 0 },
