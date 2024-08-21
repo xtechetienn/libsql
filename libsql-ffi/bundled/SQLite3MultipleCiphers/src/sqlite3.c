@@ -137025,10 +137025,11 @@ SQLITE_PRIVATE int sqlite3OpenTableAndIndices(
        * As vector index creates empty B-tree index - it's safe to issue
        * OP_OpenRead command for it
        *
-       * TODO: with current implementation, integrity_check will output error
-       * for vector index as rows will be missed in it
-       * It's better to remove this error in future - but for now it's unclear
-       * how to do that with minimal code changes
+       * In order to not produce integrity check errors we skip vector indices
+       * from integrity checks in pragma.c implementation
+       *
+       * Note, that it's dangerous to skip some indices in this code as sqlite3 rely
+       * on the fact that cursors will be opened for every index in order
        */
 #ifndef SQLITE_OMIT_VECTOR
       if( IsVectorIndex(pIdx) && op == OP_OpenWrite ){
@@ -142030,6 +142031,7 @@ SQLITE_PRIVATE void sqlite3Pragma(
             int kk;
             int ckUniq = sqlite3VdbeMakeLabel(pParse);
             if( pPk==pIdx ) continue;
+            if( IsVectorIndex(pIdx) ) continue;
             r1 = sqlite3GenerateIndexKey(pParse, pIdx, iDataCur, 0, 0, &jmp3,
                                          pPrior, r1);
             pPrior = pIdx;
@@ -142114,6 +142116,7 @@ SQLITE_PRIVATE void sqlite3Pragma(
           sqlite3VdbeLoadString(v, 2, "wrong # of entries in index ");
           for(j=0, pIdx=pTab->pIndex; pIdx; pIdx=pIdx->pNext, j++){
             if( pPk==pIdx ) continue;
+            if( IsVectorIndex(pIdx) ) continue;
             sqlite3VdbeAddOp2(v, OP_Count, iIdxCur+j, 3);
             addr = sqlite3VdbeAddOp3(v, OP_Eq, 8+j, 0, 3); VdbeCoverage(v);
             sqlite3VdbeChangeP5(v, SQLITE_NOTNULL);
