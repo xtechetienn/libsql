@@ -78,6 +78,7 @@
 **    src/vtab.c
 **    src/wal.c
 **    src/wal.h
+**    src/where.c
 **    src/wherecode.c
 **    test/all.test
 **    test/permutations.test
@@ -126770,11 +126771,6 @@ SQLITE_PRIVATE void sqlite3CreateIndex(
     goto exit_create_index;
   }
   if( vectorIdxRc >= 1 ){
-    /*
-     * SQLite can use B-Tree indices in some optimizations (like SELECT COUNT(*) can use any full B-Tree index instead of PK index)
-     * But, SQLite pretty conservative about usage of unordered indices - that's what we need here
-    */
-    pIndex->bUnordered = 1;
     pIndex->idxIsVector = 1;
   }
   if( vectorIdxRc == 1 ){
@@ -152469,6 +152465,7 @@ SQLITE_PRIVATE int sqlite3Select(
             if( pIdx->bUnordered==0
              && pIdx->szIdxRow<pTab->szTabRow
              && pIdx->pPartIdxWhere==0
+             && pIdx->idxIsVector==0
              && (!pBest || pIdx->szIdxRow<pBest->szIdxRow)
             ){
               pBest = pIdx;
@@ -166093,9 +166090,10 @@ static int whereLoopAddBtreeIndex(
     assert( pNew->u.btree.nBtm==0 );
     opMask = WO_EQ|WO_IN|WO_GT|WO_GE|WO_LT|WO_LE|WO_ISNULL|WO_IS;
   }
-  if( pProbe->bUnordered || pProbe->bLowQual ){
+  if( pProbe->bUnordered || pProbe->bLowQual || pProbe->idxIsVector ){
     if( pProbe->bUnordered ) opMask &= ~(WO_GT|WO_GE|WO_LT|WO_LE);
     if( pProbe->bLowQual )   opMask &= ~(WO_EQ|WO_IN|WO_IS);
+    if( pProbe->idxIsVector ) opMask = 0;
   }
 
   assert( pNew->u.btree.nEq<pProbe->nColumn );
@@ -166477,7 +166475,7 @@ static int indexMightHelpWithOrderBy(
   ExprList *aColExpr;
   int ii, jj;
 
-  if( pIndex->bUnordered ) return 0;
+  if( pIndex->bUnordered || pIndex->idxIsVector ) return 0;
   if( (pOB = pBuilder->pWInfo->pOrderBy)==0 ) return 0;
   for(ii=0; ii<pOB->nExpr; ii++){
     Expr *pExpr = sqlite3ExprSkipCollateAndLikely(pOB->a[ii].pExpr);
@@ -166644,6 +166642,9 @@ static SQLITE_NOINLINE u32 whereIsCoveringIndex(
   if( pWInfo->pSelect==0 ){
     /* We don't have access to the full query, so we cannot check to see
     ** if pIdx is covering.  Assume it is not. */
+    return 0;
+  }
+  if( pIdx->idxIsVector==1 ){
     return 0;
   }
   if( pIdx->bHasExpr==0 ){
@@ -166933,6 +166934,9 @@ static int whereLoopAddBtree(
     ){
       testcase( pNew->iTab!=pSrc->iCursor );  /* See ticket [98d973b8f5] */
       continue;  /* Partial index inappropriate for this query */
+    }
+    if( pProbe->idxIsVector!=0 ){
+      continue;  /* Vector index inappropriate for this query */
     }
     if( pProbe->bNoQuery ) continue;
     rSize = pProbe->aiRowLogEst[0];
@@ -167937,7 +167941,7 @@ static i8 wherePathSatisfiesOrderBy(
         pIndex = 0;
         nKeyCol = 0;
         nColumn = 1;
-      }else if( (pIndex = pLoop->u.btree.pIndex)==0 || pIndex->bUnordered ){
+      }else if( (pIndex = pLoop->u.btree.pIndex)==0 || pIndex->bUnordered || pIndex->idxIsVector ){
         return 0;
       }else{
         nKeyCol = pIndex->nKeyCol;
@@ -216046,7 +216050,6 @@ int vectorIndexSearch(
     rc = SQLITE_ERROR;
     goto out;
   }
-  assert( type == VECTOR_TYPE_FLOAT32 || type == VECTOR_TYPE_FLOAT64 || type == VECTOR_TYPE_FLOAT1BIT );
 
   pVector = vectorAlloc(type, dims);
   if( pVector == NULL ){
